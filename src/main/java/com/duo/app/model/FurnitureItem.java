@@ -8,6 +8,8 @@ public record FurnitureItem(
         String category,
         String price,
         String size,
+        String color,
+        @JsonProperty("model_path") String modelPath,
         @JsonProperty("image_url") String imageUrl,
         @JsonProperty("product_url") String productUrl,
         double width,

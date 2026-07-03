@@ -54,6 +54,9 @@
     controls: null,
     furnitureMeshes: [], // 배치된 가구 모델(최상위 그룹) 목록
     floorPlanGroup: null, // 현재 로드된 평면도 그룹 (재업로드 시 정리용)
+    visualizationGroup: null,
+    catalogItems: [],
+    activeColor: "all",
 
     selectedFurniture: null, // 현재 선택된 가구(최상위 그룹)
     selectionHelper: null, // 선택 표시용 BoxHelper
@@ -66,6 +69,14 @@
 
   const MM_TO_SCENE = 0.001; // mm -> 씬 단위(m) 변환 계수 (벡터 포맷용)
   const FLOOR_PLAN_TARGET_SIZE = 20; // 평면도 이미지를 씬에 배치할 때 긴 변 기준 목표 크기(m). 더 크게/작게 하려면 이 값을 조정하세요.
+  const COLOR_FILTERS = [
+    { value: "all", label: "All", swatch: "linear-gradient(135deg, #f8fafc, #004b87)" },
+    { value: "white", label: "White", swatch: "#ffffff" },
+    { value: "gray", label: "Gray", swatch: "#9ca3af" },
+    { value: "black", label: "Black", swatch: "#111827" },
+    { value: "brown", label: "Brown", swatch: "#8b5e3c" },
+    { value: "blue", label: "Blue", swatch: "#004b87" },
+  ];
 
   // 드래그용 재사용 객체 (매 프레임 새로 생성하지 않도록 모듈 스코프에 미리 생성)
   const raycaster = new THREE.Raycaster();
@@ -158,6 +169,7 @@
     const toolbar = document.getElementById("furniture-toolbar");
     const rotateBtn = document.getElementById("btn-rotate");
     const deleteBtn = document.getElementById("btn-delete");
+    const acceptBtn = document.getElementById("btn-accept");
 
     state.dragOffset = new THREE.Vector3();
 
@@ -175,6 +187,7 @@
 
     if (rotateBtn) rotateBtn.addEventListener("click", rotateSelectedFurniture);
     if (deleteBtn) deleteBtn.addEventListener("click", () => deleteSelectedFurniture(toolbar));
+    if (acceptBtn) acceptBtn.addEventListener("click", acceptLayout);
   }
 
   function updatePointerNDC(e, container) {
@@ -258,7 +271,11 @@
 
   function rotateSelectedFurniture() {
     if (!state.selectedFurniture) return;
+    clearVisualization();
+    updateSceneStatus("Planning Mode", "Layout changed. Accept again to refresh the visualization.");
+    const positionBefore = state.selectedFurniture.position.clone();
     state.selectedFurniture.rotation.y += Math.PI / 2; // 90도 회전
+    state.selectedFurniture.position.copy(positionBefore);
     if (state.selectionHelper) state.selectionHelper.update();
   }
 
@@ -270,6 +287,9 @@
     disposeObject3D(model);
 
     state.furnitureMeshes = state.furnitureMeshes.filter((m) => m !== model);
+    clearVisualization();
+    updateSceneStatus("Planning Mode", "Layout changed. Accept again to refresh the visualization.");
+    updateSceneMetrics();
 
     clearSelectionHighlight();
     state.selectedFurniture = null;
@@ -493,6 +513,7 @@
     state.scene.remove(state.floorPlanGroup);
     disposeObject3D(state.floorPlanGroup);
     state.floorPlanGroup = null;
+    clearVisualization();
   }
 
   // 그룹/모델을 씬에서 제거하기 전에 geometry/material(및 텍스처)을 재귀적으로 정리
@@ -530,7 +551,10 @@
 
     try {
       const items = await fetchFurnitureCatalog();
-      renderCatalog(listEl, items);
+      state.catalogItems = items || [];
+      renderColorFilters();
+      renderCatalog(listEl, getFilteredCatalogItems());
+      updateSceneMetrics();
       console.log("카탈로그 로딩 완료");
     } catch (e) {
       console.error("로딩 에러:", e);
@@ -544,8 +568,47 @@
     return res.json();
   }
 
+  function renderColorFilters() {
+    const filterEl = document.getElementById("color-filter");
+    if (!filterEl) return;
+
+    filterEl.innerHTML = "";
+
+    COLOR_FILTERS.forEach((filter) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "color-filter-btn" + (state.activeColor === filter.value ? " active" : "");
+      button.dataset.color = filter.value;
+
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = filter.swatch;
+
+      const label = document.createElement("span");
+      label.textContent = filter.label;
+
+      button.appendChild(swatch);
+      button.appendChild(label);
+      button.addEventListener("click", () => {
+        state.activeColor = filter.value;
+        renderColorFilters();
+        renderCatalog(document.getElementById("furniture-list"), getFilteredCatalogItems());
+        updateSceneMetrics();
+      });
+
+      filterEl.appendChild(button);
+    });
+  }
+
+  function getFilteredCatalogItems() {
+    if (state.activeColor === "all") return state.catalogItems;
+    return state.catalogItems.filter((item) => normalizeColor(item.color) === state.activeColor);
+  }
+
   function renderCatalog(listEl, items) {
     listEl.innerHTML = "";
+    const countEl = document.getElementById("catalog-count");
+    if (countEl) countEl.textContent = `${items ? items.length : 0} items`;
 
     if (!items || items.length === 0) {
       const empty = document.createElement("p");
@@ -563,26 +626,7 @@
   // 카탈로그 한 항목을 이미지 + 이름 + 사이즈/치수 + 가격이 보이는 카드로 렌더링
   function createFurnitureCard(item) {
     const card = document.createElement("div");
-    card.style.cssText = [
-      "display:flex",
-      "align-items:center",
-      "gap:10px",
-      "padding:8px",
-      "margin-bottom:8px",
-      "border:1px solid #e5e7eb",
-      "border-radius:8px",
-      "background:#fff",
-      "cursor:pointer",
-      "transition:box-shadow .15s ease, border-color .15s ease",
-    ].join(";");
-    card.addEventListener("mouseenter", () => {
-      card.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
-      card.style.borderColor = "#004b87";
-    });
-    card.addEventListener("mouseleave", () => {
-      card.style.boxShadow = "none";
-      card.style.borderColor = "#e5e7eb";
-    });
+    card.className = "furniture-card";
     card.addEventListener("click", () => spawnFurniture(item));
 
     card.appendChild(createFurnitureThumbnail(item));
@@ -595,8 +639,7 @@
     const thumb = document.createElement("img");
     thumb.src = item.image_url || "";
     thumb.alt = item.product_name || "furniture";
-    thumb.style.cssText =
-      "width:56px; height:56px; object-fit:contain; border-radius:6px; background:#f3f4f6; flex-shrink:0;";
+    thumb.className = "furniture-thumb";
     thumb.onerror = () => {
       // 이미지 URL이 없거나 로드에 실패하면 아이콘 플레이스홀더로 대체
       thumb.replaceWith(createThumbnailFallback());
@@ -606,43 +649,62 @@
 
   function createThumbnailFallback() {
     const fallback = document.createElement("div");
-    fallback.textContent = "🛋️";
-    fallback.style.cssText =
-      "width:56px; height:56px; display:flex; align-items:center; justify-content:center; " +
-      "font-size:24px; background:#f3f4f6; border-radius:6px; flex-shrink:0;";
+    fallback.textContent = "3D";
+    fallback.className = "thumb-fallback";
     return fallback;
   }
 
   function createFurnitureInfo(item) {
     const info = document.createElement("div");
-    info.style.cssText = "flex:1; min-width:0;";
+    info.className = "furniture-info";
 
     if (item.category) {
-      const categoryEl = document.createElement("div");
+      const categoryEl = document.createElement("span");
       categoryEl.textContent = item.category;
-      categoryEl.style.cssText =
-        "font-size:10px; color:#9ca3af; text-transform:uppercase; letter-spacing:.02em;";
-      info.appendChild(categoryEl);
+      categoryEl.className = "furniture-category";
+
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = getColorSwatch(item.color);
+
+      const row = document.createElement("div");
+      row.className = "furniture-meta-row";
+      row.appendChild(swatch);
+      row.appendChild(categoryEl);
+      info.appendChild(row);
     }
 
     const nameEl = document.createElement("div");
     nameEl.textContent = item.product_name || "이름 없음";
-    nameEl.style.cssText =
-      "font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;";
+    nameEl.className = "furniture-name";
     info.appendChild(nameEl);
 
     const metaEl = document.createElement("div");
     const sizeLabel = item.size ? `${item.size} · ` : "";
-    metaEl.textContent = `${sizeLabel}${formatDimensions(item)}`;
-    metaEl.style.cssText = "font-size:11px; color:#6b7280; margin-top:2px;";
+    metaEl.textContent = `${sizeLabel}${formatDimensions(item)} · ${formatColorLabel(item.color)}`;
+    metaEl.className = "furniture-meta";
     info.appendChild(metaEl);
 
     const priceEl = document.createElement("div");
     priceEl.textContent = formatPrice(item.price);
-    priceEl.style.cssText = "font-size:12px; color:#004b87; font-weight:600; margin-top:4px;";
+    priceEl.className = "furniture-price";
     info.appendChild(priceEl);
 
     return info;
+  }
+
+  function normalizeColor(color) {
+    return String(color || "gray").toLowerCase().replace("grey", "gray").trim();
+  }
+
+  function formatColorLabel(color) {
+    const normalized = normalizeColor(color);
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
+
+  function getColorSwatch(color) {
+    const filter = COLOR_FILTERS.find((entry) => entry.value === normalizeColor(color));
+    return filter ? filter.swatch : "#9ca3af";
   }
 
   function formatDimensions(item) {
@@ -666,15 +728,38 @@
   // 5. 가구 배치 및 스케일링
   // =========================================================
   window.spawnFurniture = function (item) {
-    const path = `/static/models/sofa/black_sofa.glb`; // 테스트용 경로
+    clearVisualization();
+    updateSceneStatus("Planning Mode", "Place furniture, rotate in-place, then accept to visualize.");
+    const path = item.model_path || resolveModelPath(item);
 
     gltfLoader.load(
       path,
       (gltf) => onFurnitureModelLoaded(gltf, item),
       undefined,
-      (err) => console.error("로드 실패", err)
+      (err) => {
+        console.error("로드 실패", err);
+        if (path !== "/static/models/sofa/gray_sofa.glb") {
+          gltfLoader.load(
+            "/static/models/sofa/gray_sofa.glb",
+            (gltf) => onFurnitureModelLoaded(gltf, { ...item, model_path: "/static/models/sofa/gray_sofa.glb" }),
+            undefined,
+            (fallbackErr) => console.error("대체 모델 로드 실패", fallbackErr)
+          );
+        }
+      }
     );
   };
+
+  function resolveModelPath(item) {
+    const color = normalizeColor(item.color);
+    if (item.category && item.category.toLowerCase().includes("bed")) {
+      return `/static/models/bed/queen_${color}_bed.glb`;
+    }
+    if (color === "blue") {
+      return "/static/models/curve_sofa/blue_curve_sofa.glb";
+    }
+    return `/static/models/sofa/${color}_sofa.glb`;
+  }
 
   function onFurnitureModelLoaded(gltf, item) {
     const model = gltf.scene;
@@ -688,10 +773,187 @@
 
     model.scale.set(targetW / size.x, targetH / size.y, targetD / size.z);
 
-    // 모델 최상위 그룹(gltf.scene)을 씬에 직접 추가한다.
-    // 드래그 시에는 findFurnitureRoot()가 이 모델을 찾아서 통째로 이동시킨다.
-    state.scene.add(model);
-    state.furnitureMeshes.push(model);
+    const pivot = createCenteredFurniturePivot(model, item);
+    pivot.position.set(0, pivot.userData.centerY || 0, 0);
+
+    state.scene.add(pivot);
+    state.furnitureMeshes.push(pivot);
+    selectFurniture(pivot, document.getElementById("furniture-toolbar"));
+    updateSceneMetrics();
+  }
+
+  function createCenteredFurniturePivot(model, item) {
+    const scaledBox = new THREE.Box3().setFromObject(model);
+    const center = scaledBox.getCenter(new THREE.Vector3());
+    const minY = scaledBox.min.y;
+    const pivot = new THREE.Group();
+
+    model.position.sub(center);
+    pivot.add(model);
+    pivot.name = item.product_name || "furniture";
+    pivot.userData = {
+      type: "furniture",
+      skuId: item.sku_id,
+      productName: item.product_name,
+      color: normalizeColor(item.color),
+      modelPath: item.model_path || resolveModelPath(item),
+      dimensions: {
+        width: Number(item.width) || 0,
+        depth: Number(item.depth) || 0,
+        height: Number(item.height) || 0,
+      },
+      centerY: center.y - minY,
+    };
+
+    pivot.traverse((obj) => {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    });
+
+    return pivot;
+  }
+
+  function updateSceneMetrics() {
+    const placedCount = document.getElementById("placed-count");
+    const activeTheme = document.getElementById("active-theme");
+    if (placedCount) placedCount.textContent = String(state.furnitureMeshes.length);
+    if (activeTheme) activeTheme.textContent = formatColorLabel(state.activeColor);
+  }
+
+  function acceptLayout() {
+    if (state.furnitureMeshes.length === 0 && !state.floorPlanGroup) {
+      updateSceneStatus("Ready", "Upload a floor plan or place furniture before accepting.");
+      return;
+    }
+
+    clearSelectionHighlight();
+    state.selectedFurniture = null;
+    const toolbar = document.getElementById("furniture-toolbar");
+    if (toolbar) toolbar.style.display = "none";
+
+    clearVisualization();
+
+    const bounds = calculateLayoutBounds();
+    const visualization = new THREE.Group();
+    visualization.name = "acceptedLayoutVisualization";
+    addPerimeterWalls(visualization, bounds);
+    addFloorFinish(visualization, bounds);
+
+    state.scene.add(visualization);
+    state.visualizationGroup = visualization;
+
+    focusCameraOnArea(bounds.width, bounds.depth, bounds.center);
+    updateSceneStatus(
+      "Visualization Accepted",
+      `${state.furnitureMeshes.length} objects rendered with floor plan and perimeter walls.`
+    );
+  }
+
+  function clearVisualization() {
+    if (!state.visualizationGroup) return;
+    state.scene.remove(state.visualizationGroup);
+    disposeObject3D(state.visualizationGroup);
+    state.visualizationGroup = null;
+  }
+
+  function calculateLayoutBounds() {
+    const box = new THREE.Box3();
+    let hasBounds = false;
+
+    if (state.floorPlanGroup) {
+      box.expandByObject(state.floorPlanGroup);
+      hasBounds = true;
+    }
+
+    state.furnitureMeshes.forEach((model) => {
+      box.expandByObject(model);
+      hasBounds = true;
+    });
+
+    if (!hasBounds || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) {
+      box.setFromCenterAndSize(new THREE.Vector3(0, 0, 0), new THREE.Vector3(8, 0.1, 6));
+    }
+
+    const padding = 0.8;
+    box.min.x -= padding;
+    box.min.z -= padding;
+    box.max.x += padding;
+    box.max.z += padding;
+
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    center.y = 0;
+
+    return {
+      minX: box.min.x,
+      maxX: box.max.x,
+      minZ: box.min.z,
+      maxZ: box.max.z,
+      width: Math.max(size.x, 2),
+      depth: Math.max(size.z, 2),
+      center,
+    };
+  }
+
+  function addPerimeterWalls(group, bounds) {
+    const wallHeight = 2.7;
+    const wallThickness = 0.12;
+    const wallMaterial = new THREE.MeshStandardMaterial({
+      color: 0xf8fafc,
+      roughness: 0.72,
+      metalness: 0.02,
+      transparent: true,
+      opacity: 0.9,
+    });
+
+    const north = createWall(bounds.width, wallHeight, wallThickness, wallMaterial);
+    north.position.set(bounds.center.x, wallHeight / 2, bounds.minZ);
+
+    const south = createWall(bounds.width, wallHeight, wallThickness, wallMaterial);
+    south.position.set(bounds.center.x, wallHeight / 2, bounds.maxZ);
+
+    const west = createWall(bounds.depth, wallHeight, wallThickness, wallMaterial);
+    west.rotation.y = Math.PI / 2;
+    west.position.set(bounds.minX, wallHeight / 2, bounds.center.z);
+
+    const east = createWall(bounds.depth, wallHeight, wallThickness, wallMaterial);
+    east.rotation.y = Math.PI / 2;
+    east.position.set(bounds.maxX, wallHeight / 2, bounds.center.z);
+
+    group.add(north, south, west, east);
+  }
+
+  function createWall(length, height, thickness, material) {
+    const geometry = new THREE.BoxGeometry(length, height, thickness);
+    const wall = new THREE.Mesh(geometry, material.clone());
+    wall.receiveShadow = true;
+    wall.castShadow = true;
+    return wall;
+  }
+
+  function addFloorFinish(group, bounds) {
+    const geometry = new THREE.PlaneGeometry(bounds.width, bounds.depth);
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xe5e7eb,
+      roughness: 0.86,
+      metalness: 0,
+      transparent: true,
+      opacity: state.floorPlanGroup ? 0.22 : 1,
+    });
+    const floor = new THREE.Mesh(geometry, material);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(bounds.center.x, -0.004, bounds.center.z);
+    floor.receiveShadow = true;
+    group.add(floor);
+  }
+
+  function updateSceneStatus(title, detail) {
+    const status = document.getElementById("scene-status");
+    if (!status) return;
+    const titleEl = status.querySelector("strong");
+    const detailEl = status.querySelector("span");
+    if (titleEl) titleEl.textContent = title;
+    if (detailEl) detailEl.textContent = detail;
   }
 
   // =========================================================

@@ -12,21 +12,47 @@
   <header id="top-nav">
     <div class="logo">
       <img src="https://www.hec.co.kr/assets/images/common/logo.svg" alt="현대엔지니어링" height="30">
-      <span>스마트 3D 인테리어 플래너</span>
+      <div>
+        <strong>Smart 3D Interior Planner</strong>
+        <span>Hyundai Engineering</span>
+      </div>
     </div>
     <div class="nav-actions">
       <label for="floorPlanInput" class="upload-btn">평면도 업로드</label>
       <input type="file" id="floorPlanInput" accept=".json" style="display: none;">
+      <button id="btn-accept" class="primary-btn" type="button">Accept</button>
     </div>
   </header>
 
   <main>
     <aside id="sidebar">
-      <h3>카탈로그</h3>
+      <section class="panel-section">
+        <div class="section-header">
+          <h2>Furniture Catalog</h2>
+          <span id="catalog-count">0 items</span>
+        </div>
+        <div id="color-filter" class="segmented-control" aria-label="Color filter"></div>
+      </section>
+
+      <section class="panel-section metrics">
+        <div>
+          <span>Placed</span>
+          <strong id="placed-count">0</strong>
+        </div>
+        <div>
+          <span>Theme</span>
+          <strong id="active-theme">All</strong>
+        </div>
+      </section>
+
       <div id="furniture-list"></div>
     </aside>
 
     <section id="canvas-container">
+      <div id="scene-status">
+        <strong>Planning Mode</strong>
+        <span>Place furniture, rotate in-place, then accept to visualize.</span>
+      </div>
       <div id="furniture-toolbar">
         <button id="btn-rotate">90도 회전</button>
         <button id="btn-delete">삭제</button>

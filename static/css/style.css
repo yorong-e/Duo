@@ -1,0 +1,137 @@
+/* 기본 초기화 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: 'Noto Sans KR', sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background-color: #121212; /* 다크 모드 배경 */
+  color: #e0e0e0;
+}
+
+/* 상단 네비게이션 (다크 스타일) */
+#top-nav {
+  height: 60px;
+  background-color: #1e1e1e;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 24px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+  z-index: 10;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 700;
+  color: #4a90e2; /* 어두운 배경에 맞는 블루 */
+  font-size: 18px;
+}
+
+.upload-btn {
+  background-color: #004b87;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.2s;
+}
+
+.upload-btn:hover {
+  background-color: #003666;
+}
+
+/* 메인 레이아웃 (사이드바 + 캔버스) */
+main {
+  display: flex;
+  flex: 1;
+  height: calc(100vh - 60px);
+}
+
+#sidebar {
+  width: 320px;
+  background-color: #1e1e1e;
+  border-right: 1px solid #333;
+  padding: 20px;
+  overflow-y: auto;
+  box-shadow: 2px 0 5px rgba(0,0,0,0.2);
+}
+
+#sidebar h3 {
+  font-size: 16px;
+  margin-bottom: 16px;
+  color: #e0e0e0;
+}
+
+/* 가구 아이템 목록 스타일 (다크 모드) */
+.furniture-item {
+  padding: 16px;
+  background-color: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: center;
+  font-weight: 500;
+  color: #ccc;
+}
+
+.furniture-item:hover {
+  background-color: #333;
+  border-color: #4a90e2;
+  color: #4a90e2;
+}
+
+/* 3D 캔버스 영역 */
+#canvas-container {
+  flex: 1;
+  position: relative;
+  background-color: #14161d;
+}
+
+/* 플로팅 툴바 (오브젝트 클릭 시 노출) */
+#furniture-toolbar {
+  display: none; 
+  position: absolute;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(30, 30, 30, 0.95);
+  padding: 10px 16px;
+  border-radius: 30px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  gap: 12px;
+  z-index: 100;
+  border: 1px solid #444;
+}
+
+#furniture-toolbar button {
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: #e0e0e0;
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+
+#furniture-toolbar button:hover {
+  background-color: #444;
+}
+
+#btn-delete:hover {
+  color: #ff5252;
+}   

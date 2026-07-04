@@ -2,6 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Hyundai Engineering - 3D Space Simulator</title>
 
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
@@ -14,18 +15,41 @@
       <img src="https://www.hec.co.kr/assets/images/common/logo.svg" alt="현대엔지니어링" height="30">
       <div>
         <strong>Smart 3D Interior Planner</strong>
-        <span>Hyundai Engineering</span>
+        <span>3D 배치, 충돌 검토, 견적 자동화</span>
       </div>
     </div>
     <div class="nav-actions">
-      <label for="floorPlanInput" class="upload-btn">평면도 업로드</label>
-      <input type="file" id="floorPlanInput" accept=".json" style="display: none;">
-      <button id="btn-accept" class="primary-btn" type="button">Accept</button>
+      <label for="floorPlanInput" class="upload-btn">평면도</label>
+      <input type="file" id="floorPlanInput" accept=".json" hidden>
+      <button id="btn-save" class="ghost-btn" type="button">저장</button>
+      <button id="btn-load" class="ghost-btn" type="button">불러오기</button>
+      <button id="btn-pdf" class="ghost-btn" type="button">PDF 견적서</button>
+      <button id="btn-accept" class="primary-btn" type="button">3D 렌더링</button>
     </div>
   </header>
 
   <main>
     <aside id="sidebar">
+      <section class="panel-section">
+        <div class="section-header">
+          <h2>추천 패턴</h2>
+          <span id="active-theme">A</span>
+        </div>
+        <div id="trend-patterns" class="pattern-grid"></div>
+      </section>
+
+      <section class="panel-section estimate-panel">
+        <div class="section-header">
+          <h2>기본 견적</h2>
+          <span id="placed-count">0개</span>
+        </div>
+        <div class="estimate-total">
+          <span>합계</span>
+          <strong id="estimate-total">0원</strong>
+        </div>
+        <div id="estimate-list" class="estimate-list"></div>
+      </section>
+
       <section class="panel-section">
         <div class="section-header">
           <h2>Furniture Catalog</h2>
@@ -34,36 +58,27 @@
         <div id="color-filter" class="segmented-control" aria-label="Color filter"></div>
       </section>
 
-      <section class="panel-section metrics">
-        <div>
-          <span>Placed</span>
-          <strong id="placed-count">0</strong>
-        </div>
-        <div>
-          <span>Theme</span>
-          <strong id="active-theme">All</strong>
-        </div>
-      </section>
-
       <div id="furniture-list"></div>
     </aside>
 
     <section id="canvas-container">
       <div id="scene-status">
         <strong>Planning Mode</strong>
-        <span>Place furniture, rotate in-place, then accept to visualize.</span>
+        <span>가구를 배치하면 충돌과 벽 간섭을 실시간으로 확인합니다.</span>
       </div>
+      <div id="warning-panel" aria-live="polite"></div>
       <div id="furniture-toolbar">
-        <button id="btn-rotate">90도 회전</button>
-        <button id="btn-delete">삭제</button>
+        <input id="material-label-input" type="text" aria-label="자재명 수정">
+        <button id="btn-rotate" type="button">90도 회전</button>
+        <button id="btn-delete" type="button">삭제</button>
       </div>
     </section>
   </main>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/DragControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="/static/js/main.js"></script>
 </body>
 </html>

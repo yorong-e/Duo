@@ -50,6 +50,19 @@
   }
 
   function initLogin(form) {
+    const savedUsername = window.localStorage.getItem("duoSavedUsername");
+    const rememberInput = form.elements.saveUsername;
+    if (savedUsername) {
+      form.elements.username.value = savedUsername;
+      if (rememberInput) rememberInput.checked = true;
+    }
+
+    document.querySelectorAll("[data-pending-message]").forEach((button) => {
+      button.addEventListener("click", () => {
+        setMessage("login-message", button.dataset.pendingMessage, "success");
+      });
+    });
+
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       clearErrors(form);
@@ -58,14 +71,23 @@
       const errors = validateLogin(payload);
       if (showErrors(form, errors)) return;
 
+      setLoading(form, true);
       postJson("/api/auth/login", payload)
         .then(() => {
+          if (payload.saveUsername) {
+            window.localStorage.setItem("duoSavedUsername", payload.username);
+          } else {
+            window.localStorage.removeItem("duoSavedUsername");
+          }
           setMessage("login-message", "로그인되었습니다. 메인 페이지로 이동합니다.", "success");
           window.setTimeout(() => {
             window.location.href = "/";
           }, 400);
         })
-        .catch((error) => showServerError(form, "login-message", error));
+        .catch((error) => {
+          setLoading(form, false);
+          showServerError(form, "login-message", error);
+        });
     });
   }
 
@@ -211,5 +233,12 @@
       setFieldError(form, error.field, error.message || "입력값을 확인해주세요.");
     }
     setMessage(messageId, error && error.message ? error.message : "요청을 처리할 수 없습니다.", "error");
+  }
+
+  function setLoading(form, loading) {
+    const button = form.querySelector(".auth-submit");
+    if (!button) return;
+    button.disabled = loading;
+    button.classList.toggle("is-loading", loading);
   }
 })();

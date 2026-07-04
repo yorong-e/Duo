@@ -26,7 +26,7 @@
     logoutButton.addEventListener("click", () => {
       fetch("/api/auth/logout", { method: "POST" })
         .finally(() => {
-          window.location.href = "/";
+          window.location.href = "/login.html";
         });
     });
   }

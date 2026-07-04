@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/auth")
 public class AuthController {
 
-    private static final String SESSION_USERNAME = "AUTH_USERNAME";
+    public static final String SESSION_USERNAME = "AUTH_USERNAME";
 
     private final AuthService authService;
 

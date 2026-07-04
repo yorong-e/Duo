@@ -11,14 +11,14 @@ DuO is now structured as a standard Spring Boot application. It serves the exist
 Open:
 
 ```text
-http://localhost:8080
+http://localhost:8081
 ```
 
 ## Verify
 
 ```bash
 ./mvnw test
-curl http://localhost:8080/api/furniture
+curl http://localhost:8081/api/furniture
 ```
 
 ## Architecture
@@ -61,7 +61,7 @@ DuO/
 │   │               └── models/
 │   └── test/java/com/duo/app/DuoApplicationTests.java
 ├── core/
-└── schema.sql
+└── floorplan_collision_detector.py
 ```
 
 ## API
@@ -91,8 +91,8 @@ The API expects a `furniture` table with these columns:
 id, category, image_url, name, size, price, product_url, width_cm, depth_cm, height_cm
 ```
 
-Reference DDL remains available at `schema.sql` and `src/main/resources/db/schema.sql`.
+Reference DDL remains available at `src/main/resources/db/schema.sql`.
 
-## Legacy Files
+## Removed Legacy Files
 
-The previous Flask files (`app.py`, `requirements.txt`, `templates/`, and root `static/`) are left in place for reference, but the plug-and-play application entrypoint is now Spring Boot via `./mvnw spring-boot:run`.
+The old Flask entrypoint and duplicate root static assets were removed. The plug-and-play application entrypoint is Spring Boot via `./mvnw spring-boot:run`.

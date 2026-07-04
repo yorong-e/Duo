@@ -1,74 +1,14 @@
-/**
- * DuO — Digital Twin Interior Web Simulator
- * 리팩토링: 기능별 함수 분리
- * - 평면도(JSON) 업로드 버그 수정 (이미지 임베드 포맷 대응)
- * - 평면도 이미지 크기 확대
- * - 가구 드래그 시 "분해되는" 버그 수정 (모델 최상위 그룹 단위로 이동)
- * - 가구 회전 / 삭제 기능 추가
- *
- * 평면도 JSON 지원 포맷 (2가지)
- * ------------------------------------------------------------
- * (A) 이미지 임베드 포맷 (실사용 파일, 예: "84A평면도_투시도.json")
- *     SVG -> JSON 변환 결과물로, 평면도/투시도 이미지가 base64 PNG로
- *     통째로 들어있는 구조입니다.
- *     {
- *       "@attributes": { "width": "595", "height": "842" },
- *       "image": {
- *         "@attributes": {
- *           "width": "595", "height": "842",
- *           "xlink:href": "data:image/png;base64,...."
- *         }
- *       }
- *     }
- *     -> data:image 로 시작하는 base64 문자열을 재귀 탐색해서 찾고,
- *        해당 이미지를 바닥 텍스처(Plane)로 렌더링합니다.
- *
- * (B) 벡터 포맷 (레거시/향후 확장용 fallback)
- *     {
- *       "width": 6000, "depth": 4000,
- *       "walls": [{ "x1":0,"y1":0,"x2":6000,"y2":0,"height":2400,"thickness":100 }],
- *       "doors": [{ "x":3000, "y":0, "radius":900 }]
- *     }
- *     -> walls 배열이 있으면 벽/문 클리어런스를 3D 박스/링으로 렌더링합니다.
- * ------------------------------------------------------------
- *
- * 가구 드래그 관련 참고
- * ------------------------------------------------------------
- * THREE.DragControls 는 recursive 옵션으로 GLB 내부의 하위 메쉬까지
- * 레이캐스트하면, 클릭된 개별 파츠(하위 메쉬)만 움직이고 나머지는 그대로
- * 남는 문제가 있습니다 (모델이 "분해"되어 보이는 원인).
- * 이 파일에서는 DragControls 대신 커스텀 드래그 로직을 사용해서,
- * 클릭된 지점에서 부모를 타고 올라가 모델의 최상위 그룹(gltf.scene)을
- * 찾은 뒤 그 그룹 전체를 이동시킵니다.
- * ------------------------------------------------------------
- */
-
 (function () {
   "use strict";
 
-  // ===== 전역 상태 =====
-  const state = {
-    scene: null,
-    camera: null,
-    renderer: null,
-    controls: null,
-    furnitureMeshes: [], // 배치된 가구 모델(최상위 그룹) 목록
-    floorPlanGroup: null, // 현재 로드된 평면도 그룹 (재업로드 시 정리용)
-    visualizationGroup: null,
-    catalogItems: [],
-    activeColor: "all",
+  const STORAGE_KEY = "duo-layout-v2";
+  const MM_TO_SCENE = 0.001;
+  const FLOOR_PLAN_TARGET_SIZE = 20;
+  const SNAP_DISTANCE = 0.35;
+  const WALL_BUFFER = 0.04;
+  const IMAGE_WALL_DARKNESS = 92;
+  const IMAGE_WALL_ALPHA = 24;
 
-    selectedFurniture: null, // 현재 선택된 가구(최상위 그룹)
-    selectionHelper: null, // 선택 표시용 BoxHelper
-    isDragging: false,
-    dragOffset: null, // THREE.Vector3, 드래그 시작 시 (교차점 - 모델위치) 오프셋
-  };
-
-  const gltfLoader = new THREE.GLTFLoader();
-  const textureLoader = new THREE.TextureLoader();
-
-  const MM_TO_SCENE = 0.001; // mm -> 씬 단위(m) 변환 계수 (벡터 포맷용)
-  const FLOOR_PLAN_TARGET_SIZE = 20; // 평면도 이미지를 씬에 배치할 때 긴 변 기준 목표 크기(m). 더 크게/작게 하려면 이 값을 조정하세요.
   const COLOR_FILTERS = [
     { value: "all", label: "All", swatch: "linear-gradient(135deg, #f8fafc, #004b87)" },
     { value: "white", label: "White", swatch: "#ffffff" },
@@ -78,116 +18,148 @@
     { value: "blue", label: "Blue", swatch: "#004b87" },
   ];
 
-  // 드래그용 재사용 객체 (매 프레임 새로 생성하지 않도록 모듈 스코프에 미리 생성)
+  const TREND_PATTERNS = [
+    {
+      code: "A",
+      name: "미니멀",
+      color: "white",
+      placements: [
+        { category: "소파", x: -1.8, z: -1.2, rot: 0 },
+        { category: "침대", x: 1.8, z: 1.1, rot: Math.PI / 2 },
+      ],
+    },
+    {
+      code: "B",
+      name: "웜우드",
+      color: "brown",
+      placements: [
+        { category: "소파", x: -2.1, z: 0.8, rot: Math.PI / 2 },
+        { category: "침대", x: 1.8, z: -1.2, rot: 0 },
+      ],
+    },
+    {
+      code: "C",
+      name: "모던블랙",
+      color: "black",
+      placements: [
+        { category: "소파", x: -1.6, z: -1.5, rot: 0 },
+        { category: "소파", x: 1.6, z: 1.5, rot: Math.PI },
+      ],
+    },
+    {
+      code: "D",
+      name: "트렌드블루",
+      color: "blue",
+      placements: [
+        { category: "소파", x: -1.9, z: 0, rot: Math.PI / 2 },
+        { category: "침대", x: 1.7, z: 1.3, rot: 0 },
+      ],
+    },
+  ];
+
+  const state = {
+    scene: null,
+    camera: null,
+    renderer: null,
+    controls: null,
+    floorPlanGroup: null,
+    visualizationGroup: null,
+    floorBounds: null,
+    imageWallMask: null,
+    wallObjects: [],
+    furnitureMeshes: [],
+    selectedFurniture: null,
+    selectionHelper: null,
+    collisionHelpers: [],
+    isDragging: false,
+    dragOffset: null,
+    catalogItems: [],
+    activeColor: "all",
+    activePattern: "A",
+    lastWarnings: [],
+    blockedDragWarning: "",
+    suppressAutoSelect: false,
+  };
+
+  const gltfLoader = new THREE.GLTFLoader();
+  const textureLoader = new THREE.TextureLoader();
   const raycaster = new THREE.Raycaster();
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const pointerNDC = new THREE.Vector2();
   const planeIntersectPoint = new THREE.Vector3();
 
-  // ===== 진입점 =====
   window.onload = function () {
-    console.log("App Starting...");
     initScene();
     initInteraction();
     initFloorPlanLoader();
+    renderTrendPatterns();
     loadCatalog();
     window.addEventListener("resize", onWindowResize);
     animate();
   };
 
-  // =========================================================
-  // 1. Scene / Camera / Renderer 초기화
-  // =========================================================
   function initScene() {
     const container = getCanvasContainer();
+    state.scene = new THREE.Scene();
+    state.scene.background = new THREE.Color(0xe5e7eb);
+    state.camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1000);
+    state.camera.position.set(5, 6, 7);
+    state.renderer = new THREE.WebGLRenderer({ antialias: true });
+    state.renderer.setSize(container.clientWidth, container.clientHeight);
+    state.renderer.shadowMap.enabled = true;
+    container.appendChild(state.renderer.domElement);
 
-    state.scene = createScene();
-    state.camera = createCamera(container);
-    state.renderer = createRenderer(container);
-    state.controls = createOrbitControls(state.camera, state.renderer);
+    state.controls = new THREE.OrbitControls(state.camera, state.renderer.domElement);
+    state.controls.enableDamping = true;
 
-    addLights(state.scene);
-    addGrid(state.scene);
+    state.scene.add(new THREE.AmbientLight(0xffffff, 0.82));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.72);
+    dirLight.position.set(6, 10, 8);
+    dirLight.castShadow = true;
+    state.scene.add(dirLight);
+
+    const grid = new THREE.GridHelper(20, 20, 0x004b87, 0xaaaaaa);
+    grid.position.y = 0.01;
+    state.scene.add(grid);
+    setFloorBounds({ minX: -10, maxX: 10, minZ: -10, maxZ: 10 });
   }
 
   function getCanvasContainer() {
     return document.getElementById("canvas-container");
   }
 
-  function createScene() {
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xe5e7eb);
-    return scene;
-  }
-
-  function createCamera(container) {
-    const camera = new THREE.PerspectiveCamera(
-      60,
-      container.clientWidth / container.clientHeight,
-      0.1,
-      1000
-    );
-    camera.position.set(5, 5, 5);
-    return camera;
-  }
-
-  function createRenderer(container) {
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.shadowMap.enabled = true;
-    container.appendChild(renderer.domElement);
-    return renderer;
-  }
-
-  function createOrbitControls(camera, renderer) {
-    const controls = new THREE.OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    return controls;
-  }
-
-  function addLights(scene) {
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
-    scene.add(ambientLight);
-
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
-    dirLight.position.set(5, 10, 7);
-    dirLight.castShadow = true;
-    scene.add(dirLight);
-  }
-
-  function addGrid(scene) {
-    const gridHelper = new THREE.GridHelper(20, 20, 0x004b87, 0xaaaaaa);
-    gridHelper.position.y = 0.01;
-    scene.add(gridHelper);
-  }
-
-  // =========================================================
-  // 2. 상호작용 (가구 선택 / 드래그 이동 / 회전 / 삭제)
-  // =========================================================
   function initInteraction() {
     const container = getCanvasContainer();
     const toolbar = document.getElementById("furniture-toolbar");
-    const rotateBtn = document.getElementById("btn-rotate");
-    const deleteBtn = document.getElementById("btn-delete");
-    const acceptBtn = document.getElementById("btn-accept");
+    const labelInput = document.getElementById("material-label-input");
 
     state.dragOffset = new THREE.Vector3();
-
     container.addEventListener("pointerdown", (e) => onPointerDown(e, container, toolbar));
     container.addEventListener("pointermove", (e) => onPointerMove(e, container));
+    container.addEventListener("dragover", (e) => e.preventDefault());
+    container.addEventListener("drop", (e) => onCatalogDrop(e, container));
     window.addEventListener("pointerup", onPointerUp);
 
-    // 툴바가 canvas-container 내부에 위치해 있어서, 버튼을 누르는 순간의
-    // pointerdown이 그대로 컨테이너까지 버블링되어 "빈 공간 클릭"으로 처리되고
-    // 선택이 풀려버리는 문제가 있었다. 툴바 안에서 발생한 pointerdown은
-    // 캔버스 쪽으로 전달되지 않도록 막아서 회전/삭제 버튼이 정상 동작하게 한다.
-    if (toolbar) {
-      toolbar.addEventListener("pointerdown", (e) => e.stopPropagation());
-    }
+    if (toolbar) toolbar.addEventListener("pointerdown", (e) => e.stopPropagation());
+    bindClick("btn-rotate", rotateSelectedFurniture);
+    bindClick("btn-delete", () => deleteSelectedFurniture(toolbar));
+    bindClick("btn-accept", acceptLayout);
+    bindClick("btn-save", saveLayout);
+    bindClick("btn-load", loadSavedLayout);
+    bindClick("btn-pdf", downloadEstimatePdf);
 
-    if (rotateBtn) rotateBtn.addEventListener("click", rotateSelectedFurniture);
-    if (deleteBtn) deleteBtn.addEventListener("click", () => deleteSelectedFurniture(toolbar));
-    if (acceptBtn) acceptBtn.addEventListener("click", acceptLayout);
+    if (labelInput) {
+      labelInput.addEventListener("input", () => {
+        if (!state.selectedFurniture) return;
+        state.selectedFurniture.userData.label = labelInput.value.trim() || state.selectedFurniture.userData.productName;
+        updateEstimate();
+      });
+    }
+  }
+
+  function bindClick(id, handler) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", handler);
   }
 
   function updatePointerNDC(e, container) {
@@ -199,7 +171,6 @@
   function onPointerDown(e, container, toolbar) {
     updatePointerNDC(e, container);
     raycaster.setFromCamera(pointerNDC, state.camera);
-
     const intersects = raycaster.intersectObjects(state.furnitureMeshes, true);
 
     if (intersects.length === 0) {
@@ -209,7 +180,6 @@
 
     const root = findFurnitureRoot(intersects[0].object);
     selectFurniture(root, toolbar);
-
     if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
       state.dragOffset.copy(planeIntersectPoint).sub(root.position);
       state.isDragging = true;
@@ -219,43 +189,68 @@
 
   function onPointerMove(e, container) {
     if (!state.isDragging || !state.selectedFurniture) return;
-
     updatePointerNDC(e, container);
     raycaster.setFromCamera(pointerNDC, state.camera);
+    if (!raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) return;
 
-    if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
-      state.selectedFurniture.position.x = planeIntersectPoint.x - state.dragOffset.x;
-      state.selectedFurniture.position.z = planeIntersectPoint.z - state.dragOffset.z;
-      if (state.selectionHelper) state.selectionHelper.update();
+    const next = new THREE.Vector3(
+      planeIntersectPoint.x - state.dragOffset.x,
+      state.selectedFurniture.position.y,
+      planeIntersectPoint.z - state.dragOffset.z
+    );
+    const snapped = applyWallMagnetAndBounds(state.selectedFurniture, next);
+    const blocked = getBlockedPlacementAt(state.selectedFurniture, snapped.position);
+    if (blocked) {
+      const safe = state.selectedFurniture.userData.lastSafePosition;
+      if (safe) state.selectedFurniture.position.copy(safe);
+      state.blockedDragWarning = `${state.selectedFurniture.userData.label}은 벽 위에 배치할 수 없습니다.`;
+      updateSafetyState(snapped.message);
+      addCollisionFootprint(blocked.box);
+    } else {
+      state.selectedFurniture.position.copy(snapped.position);
+      state.selectedFurniture.userData.lastSafePosition = snapped.position.clone();
+      state.blockedDragWarning = "";
+      updateSafetyState(snapped.message);
     }
+    if (state.selectionHelper) state.selectionHelper.update();
+    updateEstimate();
   }
 
   function onPointerUp() {
     if (!state.isDragging) return;
     state.isDragging = false;
     state.controls.enabled = true;
+    updateSafetyState();
+    updateEstimate();
   }
 
-  // 클릭된 하위 메쉬에서 부모를 타고 올라가 씬에 직접 추가된 최상위 모델(gltf.scene)을 찾는다.
-  // -> 이 최상위 그룹을 통째로 옮겨야 GLB가 "분해"되지 않는다.
+  function onCatalogDrop(e, container) {
+    e.preventDefault();
+    const skuId = e.dataTransfer.getData("text/plain");
+    const item = state.catalogItems.find((entry) => entry.sku_id === skuId);
+    if (!item) return;
+    updatePointerNDC(e, container);
+    raycaster.setFromCamera(pointerNDC, state.camera);
+    if (!raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) return;
+    spawnFurniture(item, { x: planeIntersectPoint.x, z: planeIntersectPoint.z });
+  }
+
   function findFurnitureRoot(object) {
     let current = object;
-    while (current.parent && current.parent !== state.scene) {
-      current = current.parent;
-    }
+    while (current.parent && current.parent !== state.scene) current = current.parent;
     return current;
   }
 
   function selectFurniture(model, toolbar) {
-    if (state.selectedFurniture === model) return;
-
     clearSelectionHighlight();
     state.selectedFurniture = model;
+    const labelInput = document.getElementById("material-label-input");
 
     if (model) {
       state.selectionHelper = new THREE.BoxHelper(model, 0x004b87);
       state.scene.add(state.selectionHelper);
       if (toolbar) toolbar.style.display = "flex";
+      if (labelInput) labelInput.value = model.userData.label || model.userData.productName || "자재";
     } else if (toolbar) {
       toolbar.style.display = "none";
     }
@@ -272,109 +267,72 @@
   function rotateSelectedFurniture() {
     if (!state.selectedFurniture) return;
     clearVisualization();
-    updateSceneStatus("Planning Mode", "Layout changed. Accept again to refresh the visualization.");
-    const positionBefore = state.selectedFurniture.position.clone();
-    state.selectedFurniture.rotation.y += Math.PI / 2; // 90도 회전
-    state.selectedFurniture.position.copy(positionBefore);
+    state.selectedFurniture.rotation.y += Math.PI / 2;
     if (state.selectionHelper) state.selectionHelper.update();
+    updateSafetyState();
+    updateEstimate();
   }
 
   function deleteSelectedFurniture(toolbar) {
     const model = state.selectedFurniture;
     if (!model) return;
-
     state.scene.remove(model);
     disposeObject3D(model);
-
     state.furnitureMeshes = state.furnitureMeshes.filter((m) => m !== model);
-    clearVisualization();
-    updateSceneStatus("Planning Mode", "Layout changed. Accept again to refresh the visualization.");
-    updateSceneMetrics();
-
     clearSelectionHighlight();
+    clearVisualization();
     state.selectedFurniture = null;
     if (toolbar) toolbar.style.display = "none";
+    updateSafetyState();
+    updateEstimate();
   }
 
-  // =========================================================
-  // 3. 평면도(JSON) 업로드
-  // =========================================================
   function initFloorPlanLoader() {
     const input = document.getElementById("floorPlanInput");
     if (!input) return;
-
     input.addEventListener("change", handleFloorPlanFileSelected);
   }
 
   function handleFloorPlanFileSelected(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-
-    // 같은 파일을 다시 선택해도 change 이벤트가 발생하도록 초기화
     e.target.value = "";
-
     if (!file.name.toLowerCase().endsWith(".json")) {
       alert("JSON 형식의 평면도 파일만 업로드할 수 있습니다.");
       return;
     }
 
     const reader = new FileReader();
-
     reader.onload = (event) => {
-      let planData;
       try {
-        planData = JSON.parse(event.target.result);
+        loadFloorPlan(JSON.parse(event.target.result));
       } catch (err) {
-        console.error("평면도 JSON 파싱 실패:", err);
-        alert("평면도 파일을 열 수 없습니다. JSON 형식이 올바른지 확인해주세요.");
-        return;
-      }
-
-      try {
-        loadFloorPlan(planData);
-      } catch (err) {
-        console.error("평면도 처리 실패:", err);
-        alert("평면도 데이터를 불러오는 중 오류가 발생했습니다: " + err.message);
+        console.error(err);
+        alert("평면도 데이터를 불러오지 못했습니다: " + err.message);
       }
     };
-
-    reader.onerror = () => {
-      console.error("파일 읽기 실패:", reader.error);
-      alert("평면도 파일을 읽는 중 오류가 발생했습니다.");
-    };
-
+    reader.onerror = () => alert("평면도 파일을 읽는 중 오류가 발생했습니다.");
     reader.readAsText(file);
   }
 
-  // 두 포맷(이미지 임베드 / 벡터)을 판별해서 분기
   function loadFloorPlan(planData) {
     const imageDataUri = findImageDataUri(planData);
-
     if (imageDataUri) {
       loadImageFloorPlan(planData, imageDataUri);
       return;
     }
-
     if (Array.isArray(planData && planData.walls)) {
       loadVectorFloorPlan(planData);
       return;
     }
-
-    throw new Error(
-      "지원하지 않는 평면도 형식입니다. (이미지 데이터 또는 walls 배열이 필요합니다)"
-    );
+    throw new Error("지원하지 않는 평면도 형식입니다.");
   }
 
-  // JSON 트리 어디에 있든 "data:image..." 로 시작하는 base64 문자열을 재귀 탐색
   function findImageDataUri(node, depth) {
     depth = depth || 0;
     if (depth > 20 || node == null) return null;
-
-    if (typeof node === "string" && node.indexOf("data:image") === 0) {
-      return node;
-    }
+    if (typeof node === "string" && node.indexOf("data:image") === 0) return node;
     if (typeof node !== "object") return null;
-
     for (const key of Object.keys(node)) {
       const found = findImageDataUri(node[key], depth + 1);
       if (found) return found;
@@ -382,222 +340,222 @@
     return null;
   }
 
-  // ---- (A) 이미지 임베드 포맷 ----
   function loadImageFloorPlan(planData, imageDataUri) {
-    const { width, height } = getFloorPlanPixelSize(planData);
+    const attrs = getFloorPlanPixelSize(planData);
+    textureLoader.load(imageDataUri, (texture) => {
+      clearFloorPlan();
+      const scale = FLOOR_PLAN_TARGET_SIZE / Math.max(attrs.width, attrs.height);
+      const planeW = attrs.width * scale;
+      const planeH = attrs.height * scale;
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(planeW, planeH),
+        new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide, transparent: true })
+      );
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(0, 0.001, 0);
 
-    textureLoader.load(
-      imageDataUri,
-      (texture) => {
-        clearFloorPlan();
+      const group = new THREE.Group();
+      group.name = "floorPlan";
+      group.add(mesh);
+      state.scene.add(group);
+      state.floorPlanGroup = group;
+      setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
+      buildImageWallMask(imageDataUri, attrs.width, attrs.height, planeW, planeH);
+      focusCameraOnArea(planeW, planeH, new THREE.Vector3(0, 0, 0));
+      updateSceneStatus("평면도 로드 완료", "검은 도면선을 벽으로 인식해 가구 배치를 제한합니다.");
+      updateSafetyState();
+    });
+  }
 
-        const scale = FLOOR_PLAN_TARGET_SIZE / Math.max(width, height);
-        const planeW = width * scale;
-        const planeH = height * scale;
+  function buildImageWallMask(imageDataUri, width, height, planeW, planeH) {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, width, height);
+      const rgba = ctx.getImageData(0, 0, width, height).data;
+      const mask = new Uint8Array(width * height);
+      let wallPixels = 0;
 
-        const geometry = new THREE.PlaneGeometry(planeW, planeH);
-        const material = new THREE.MeshBasicMaterial({
-          map: texture,
-          side: THREE.DoubleSide,
-          transparent: true,
-        });
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.rotation.x = -Math.PI / 2; // 바닥에 눕히기
-        // PlaneGeometry는 자기 중심(로컬 원점)을 기준으로 만들어지므로, 위치를
-        // (0,0,0)으로 두면 평면도가 씬/그리드의 정중앙에 오게 된다.
-        // (기존에는 planeW/2, planeH/2 로 이동시켜서 원점 기준 모서리에 붙어있었음)
-        mesh.position.set(0, 0.001, 0); // 그리드와 겹치지 않게 y만 살짝 띄움
-
-        const group = new THREE.Group();
-        group.name = "floorPlan";
-        group.add(mesh);
-
-        state.scene.add(group);
-        state.floorPlanGroup = group;
-
-        focusCameraOnArea(planeW, planeH, new THREE.Vector3(0, 0, 0));
-        console.log("평면도 이미지 로딩 완료");
-      },
-      undefined,
-      (err) => {
-        console.error("평면도 이미지 로드 실패:", err);
-        alert("평면도 이미지를 불러오지 못했습니다.");
+      for (let i = 0, p = 0; i < rgba.length; i += 4, p += 1) {
+        const r = rgba[i];
+        const g = rgba[i + 1];
+        const b = rgba[i + 2];
+        const a = rgba[i + 3];
+        const darkness = (r + g + b) / 3;
+        if (a > IMAGE_WALL_ALPHA && darkness < IMAGE_WALL_DARKNESS) {
+          mask[p] = 1;
+          wallPixels += 1;
+        }
       }
-    );
+
+      state.imageWallMask = {
+        width,
+        height,
+        planeW,
+        planeH,
+        mask,
+      };
+      updateSceneStatus("벽 마스크 분석 완료", `검은 벽 픽셀 ${wallPixels.toLocaleString("ko-KR")}개를 배치 금지 영역으로 설정했습니다.`);
+      updateSafetyState();
+    };
+    img.onerror = () => {
+      state.imageWallMask = null;
+      updateSceneStatus("벽 마스크 분석 실패", "평면도 이미지는 표시되지만 검은 벽 충돌 분석은 적용되지 않았습니다.");
+    };
+    img.src = imageDataUri;
   }
 
   function getFloorPlanPixelSize(planData) {
     const rootAttrs = planData["@attributes"] || {};
     const imageAttrs = (planData.image && planData.image["@attributes"]) || {};
-
-    const width = parseFloat(rootAttrs.width || imageAttrs.width) || 1000;
-    const height = parseFloat(rootAttrs.height || imageAttrs.height) || 1000;
-    return { width, height };
+    return {
+      width: parseFloat(rootAttrs.width || imageAttrs.width) || 1000,
+      height: parseFloat(rootAttrs.height || imageAttrs.height) || 1000,
+    };
   }
 
-  // ---- (B) 벡터 포맷 (레거시 fallback) ----
   function loadVectorFloorPlan(planData) {
     clearFloorPlan();
-
     const group = new THREE.Group();
     group.name = "floorPlan";
-
+    state.wallObjects = [];
     planData.walls.forEach((wall) => addWallToGroup(group, wall));
-    if (Array.isArray(planData.doors)) {
-      planData.doors.forEach((door) => addDoorMarkerToGroup(group, door));
-    }
-
+    if (Array.isArray(planData.doors)) planData.doors.forEach((door) => addDoorMarkerToGroup(group, door));
     state.scene.add(group);
     state.floorPlanGroup = group;
 
     const width = (planData.width || 6000) * MM_TO_SCENE;
     const depth = (planData.depth || 4000) * MM_TO_SCENE;
+    setFloorBounds({ minX: 0, maxX: width, minZ: 0, maxZ: depth });
     focusCameraOnArea(width, depth);
-    console.log("평면도(벡터) 로딩 완료");
+    updateSceneStatus("벡터 평면도 로드 완료", "벽체 충돌과 외곽 벽 자석을 적용합니다.");
+    updateSafetyState();
   }
 
   function addWallToGroup(group, wall) {
     const { x1, y1, x2, y2 } = wall || {};
-    if ([x1, y1, x2, y2].some((v) => typeof v !== "number")) {
-      console.warn("잘못된 벽 데이터, 건너뜁니다:", wall);
-      return;
-    }
-
+    if ([x1, y1, x2, y2].some((v) => typeof v !== "number")) return;
     const height = (wall.height || 2400) * MM_TO_SCENE;
     const thickness = (wall.thickness || 100) * MM_TO_SCENE;
-
     const dx = (x2 - x1) * MM_TO_SCENE;
-    const dy = (y2 - y1) * MM_TO_SCENE;
-    const length = Math.sqrt(dx * dx + dy * dy);
+    const dz = (y2 - y1) * MM_TO_SCENE;
+    const length = Math.sqrt(dx * dx + dz * dz);
     if (length === 0) return;
 
-    const geometry = new THREE.BoxGeometry(length, height, thickness);
-    const material = new THREE.MeshStandardMaterial({ color: 0xcccccc });
-    const mesh = new THREE.Mesh(geometry, material);
-
-    const midX = (x1 + x2) * 0.5 * MM_TO_SCENE;
-    const midZ = (y1 + y2) * 0.5 * MM_TO_SCENE;
-    mesh.position.set(midX, height / 2, midZ);
-    mesh.rotation.y = -Math.atan2(dy, dx);
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(length, height, thickness),
+      new THREE.MeshStandardMaterial({ color: 0xd1d5db })
+    );
+    mesh.position.set((x1 + x2) * 0.5 * MM_TO_SCENE, height / 2, (y1 + y2) * 0.5 * MM_TO_SCENE);
+    mesh.rotation.y = -Math.atan2(dz, dx);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
-
     group.add(mesh);
+    state.wallObjects.push(mesh);
   }
 
   function addDoorMarkerToGroup(group, door) {
-    const { x, y } = door || {};
-    if (typeof x !== "number" || typeof y !== "number") {
-      console.warn("잘못된 문 데이터, 건너뜁니다:", door);
-      return;
-    }
+    if (typeof door.x !== "number" || typeof door.y !== "number") return;
     const radius = (door.radius || 900) * MM_TO_SCENE;
-
-    const geometry = new THREE.RingGeometry(Math.max(radius - 0.02, 0.01), radius, 32);
-    const material = new THREE.MeshBasicMaterial({
-      color: 0x004b87,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.5,
-    });
-    const ring = new THREE.Mesh(geometry, material);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(Math.max(radius - 0.02, 0.01), radius, 32),
+      new THREE.MeshBasicMaterial({ color: 0x004b87, side: THREE.DoubleSide, transparent: true, opacity: 0.5 })
+    );
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(x * MM_TO_SCENE, 0.02, y * MM_TO_SCENE);
-
+    ring.position.set(door.x * MM_TO_SCENE, 0.02, door.y * MM_TO_SCENE);
     group.add(ring);
   }
 
-  // ---- 공통 ----
+  function setFloorBounds(bounds) {
+    state.floorBounds = {
+      minX: bounds.minX,
+      maxX: bounds.maxX,
+      minZ: bounds.minZ,
+      maxZ: bounds.maxZ,
+      get width() { return this.maxX - this.minX; },
+      get depth() { return this.maxZ - this.minZ; },
+      get center() { return new THREE.Vector3((this.minX + this.maxX) / 2, 0, (this.minZ + this.maxZ) / 2); },
+    };
+  }
+
   function clearFloorPlan() {
-    if (!state.floorPlanGroup) return;
-    state.scene.remove(state.floorPlanGroup);
-    disposeObject3D(state.floorPlanGroup);
+    if (state.floorPlanGroup) {
+      state.scene.remove(state.floorPlanGroup);
+      disposeObject3D(state.floorPlanGroup);
+    }
     state.floorPlanGroup = null;
+    state.imageWallMask = null;
+    state.wallObjects = [];
     clearVisualization();
   }
 
-  // 그룹/모델을 씬에서 제거하기 전에 geometry/material(및 텍스처)을 재귀적으로 정리
-  function disposeObject3D(object) {
-    object.traverse((obj) => {
-      if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) {
-        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
-        materials.forEach((m) => {
-          if (m.map) m.map.dispose();
-          m.dispose();
-        });
-      }
-    });
-  }
-
-  // width/depth(씬 단위, m)에 맞춰 카메라를 평면도가 잘 보이는 위치로 이동
-  // centerOverride를 주면 그 지점을 기준으로, 없으면 (width/2, 0, depth/2)를 기준으로 삼는다.
-  function focusCameraOnArea(width, depth, centerOverride) {
-    const center = centerOverride || new THREE.Vector3(width / 2, 0, depth / 2);
-    const distance = Math.max(width, depth) * 1.2 || 5;
-
-    state.camera.position.set(center.x + distance, distance, center.z + distance);
-    state.controls.target.copy(center);
-    state.controls.update();
-  }
-
-  // =========================================================
-  // 4. 카탈로그 (서버 API 연동)
-  // =========================================================
   async function loadCatalog() {
-    console.log("카탈로그 로딩 중...");
     const listEl = document.getElementById("furniture-list");
     if (!listEl) return;
-
     try {
-      const items = await fetchFurnitureCatalog();
-      state.catalogItems = items || [];
+      const res = await fetch("/api/furniture");
+      if (!res.ok) throw new Error("API 요청 실패");
+      state.catalogItems = await res.json();
       renderColorFilters();
-      renderCatalog(listEl, getFilteredCatalogItems());
-      updateSceneMetrics();
-      console.log("카탈로그 로딩 완료");
-    } catch (e) {
-      console.error("로딩 에러:", e);
+      renderCatalog();
+      updateEstimate();
+    } catch (err) {
+      console.error(err);
       listEl.innerHTML = "데이터를 불러올 수 없습니다.";
     }
   }
 
-  async function fetchFurnitureCatalog() {
-    const res = await fetch("/api/furniture");
-    if (!res.ok) throw new Error("API 요청 실패");
-    return res.json();
-  }
-
   function renderColorFilters() {
-    const filterEl = document.getElementById("color-filter");
-    if (!filterEl) return;
-
-    filterEl.innerHTML = "";
-
+    const el = document.getElementById("color-filter");
+    if (!el) return;
+    el.innerHTML = "";
     COLOR_FILTERS.forEach((filter) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "color-filter-btn" + (state.activeColor === filter.value ? " active" : "");
-      button.dataset.color = filter.value;
-
-      const swatch = document.createElement("span");
-      swatch.className = "swatch";
-      swatch.style.background = filter.swatch;
-
-      const label = document.createElement("span");
-      label.textContent = filter.label;
-
-      button.appendChild(swatch);
-      button.appendChild(label);
+      button.innerHTML = `<span class="swatch"></span><span>${filter.label}</span>`;
+      button.querySelector(".swatch").style.background = filter.swatch;
       button.addEventListener("click", () => {
         state.activeColor = filter.value;
         renderColorFilters();
-        renderCatalog(document.getElementById("furniture-list"), getFilteredCatalogItems());
-        updateSceneMetrics();
+        renderCatalog();
       });
-
-      filterEl.appendChild(button);
+      el.appendChild(button);
     });
+  }
+
+  function renderTrendPatterns() {
+    const el = document.getElementById("trend-patterns");
+    if (!el) return;
+    el.innerHTML = "";
+    TREND_PATTERNS.forEach((pattern) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "pattern-btn" + (state.activePattern === pattern.code ? " active" : "");
+      button.innerHTML = `<strong>${pattern.code}</strong><span>${pattern.name}</span>`;
+      button.addEventListener("click", () => applyTrendPattern(pattern));
+      el.appendChild(button);
+    });
+  }
+
+  function renderCatalog() {
+    const listEl = document.getElementById("furniture-list");
+    const countEl = document.getElementById("catalog-count");
+    if (!listEl) return;
+    const items = getFilteredCatalogItems();
+    if (countEl) countEl.textContent = `${items.length} items`;
+    listEl.innerHTML = "";
+    if (items.length === 0) {
+      const empty = document.createElement("p");
+      empty.textContent = "표시할 가구가 없습니다.";
+      empty.style.cssText = "padding:10px; color:#888; font-size:13px;";
+      listEl.appendChild(empty);
+      return;
+    }
+    items.forEach((item) => listEl.appendChild(createFurnitureCard(item)));
   }
 
   function getFilteredCatalogItems() {
@@ -605,33 +563,15 @@
     return state.catalogItems.filter((item) => normalizeColor(item.color) === state.activeColor);
   }
 
-  function renderCatalog(listEl, items) {
-    listEl.innerHTML = "";
-    const countEl = document.getElementById("catalog-count");
-    if (countEl) countEl.textContent = `${items ? items.length : 0} items`;
-
-    if (!items || items.length === 0) {
-      const empty = document.createElement("p");
-      empty.textContent = "표시할 가구가 없습니다.";
-      empty.style.cssText = "padding:10px; color:#888; font-size:13px;";
-      listEl.appendChild(empty);
-      return;
-    }
-
-    items.forEach((item) => {
-      listEl.appendChild(createFurnitureCard(item));
-    });
-  }
-
-  // 카탈로그 한 항목을 이미지 + 이름 + 사이즈/치수 + 가격이 보이는 카드로 렌더링
   function createFurnitureCard(item) {
     const card = document.createElement("div");
     card.className = "furniture-card";
+    card.draggable = true;
     card.addEventListener("click", () => spawnFurniture(item));
+    card.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/plain", item.sku_id || ""));
 
     card.appendChild(createFurnitureThumbnail(item));
     card.appendChild(createFurnitureInfo(item));
-
     return card;
   }
 
@@ -640,10 +580,7 @@
     thumb.src = item.image_url || "";
     thumb.alt = item.product_name || "furniture";
     thumb.className = "furniture-thumb";
-    thumb.onerror = () => {
-      // 이미지 URL이 없거나 로드에 실패하면 아이콘 플레이스홀더로 대체
-      thumb.replaceWith(createThumbnailFallback());
-    };
+    thumb.onerror = () => thumb.replaceWith(createThumbnailFallback());
     return thumb;
   }
 
@@ -657,22 +594,16 @@
   function createFurnitureInfo(item) {
     const info = document.createElement("div");
     info.className = "furniture-info";
-
-    if (item.category) {
-      const categoryEl = document.createElement("span");
-      categoryEl.textContent = item.category;
-      categoryEl.className = "furniture-category";
-
-      const swatch = document.createElement("span");
-      swatch.className = "swatch";
-      swatch.style.background = getColorSwatch(item.color);
-
-      const row = document.createElement("div");
-      row.className = "furniture-meta-row";
-      row.appendChild(swatch);
-      row.appendChild(categoryEl);
-      info.appendChild(row);
-    }
+    const row = document.createElement("div");
+    row.className = "furniture-meta-row";
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.background = getColorSwatch(item.color);
+    const categoryEl = document.createElement("span");
+    categoryEl.textContent = item.category || "Furniture";
+    categoryEl.className = "furniture-category";
+    row.append(swatch, categoryEl);
+    info.appendChild(row);
 
     const nameEl = document.createElement("div");
     nameEl.textContent = item.product_name || "이름 없음";
@@ -680,8 +611,7 @@
     info.appendChild(nameEl);
 
     const metaEl = document.createElement("div");
-    const sizeLabel = item.size ? `${item.size} · ` : "";
-    metaEl.textContent = `${sizeLabel}${formatDimensions(item)} · ${formatColorLabel(item.color)}`;
+    metaEl.textContent = `${item.size ? item.size + " · " : ""}${formatDimensions(item)} · ${formatColorLabel(item.color)}`;
     metaEl.className = "furniture-meta";
     info.appendChild(metaEl);
 
@@ -689,8 +619,650 @@
     priceEl.textContent = formatPrice(item.price);
     priceEl.className = "furniture-price";
     info.appendChild(priceEl);
-
     return info;
+  }
+
+  function spawnFurniture(item, options) {
+    options = options || {};
+    clearVisualization();
+    const path = item.model_path || resolveModelPath(item);
+    loadFurnitureModel([path, "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"], item, options);
+  }
+
+  function loadFurnitureModel(paths, item, options, index) {
+    index = index || 0;
+    const path = paths[index];
+    if (!path) {
+      console.error("가구 모델을 불러오지 못했습니다.", item);
+      return;
+    }
+    gltfLoader.load(
+      path,
+      (gltf) => onFurnitureModelLoaded(gltf, item, options),
+      undefined,
+      () => loadFurnitureModel(paths, item, options, index + 1)
+    );
+  }
+
+  function onFurnitureModelLoaded(gltf, item, options) {
+    const model = gltf.scene;
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const targetW = (Number(item.width) || 150) * 0.01;
+    const targetH = (Number(item.height) || 80) * 0.01;
+    const targetD = (Number(item.depth) || 80) * 0.01;
+    model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
+
+    const pivot = createCenteredFurniturePivot(model, item);
+    pivot.position.set(options.x || 0, pivot.userData.centerY || 0, options.z || 0);
+    pivot.rotation.y = options.rot || 0;
+    state.scene.add(pivot);
+    state.furnitureMeshes.push(pivot);
+    const constrained = applyWallMagnetAndBounds(pivot, pivot.position);
+    const safePosition = findNearestSafePosition(pivot, constrained.position);
+    if (!safePosition) {
+      state.scene.remove(pivot);
+      state.furnitureMeshes = state.furnitureMeshes.filter((model) => model !== pivot);
+      disposeObject3D(pivot);
+      updateSafetyState(`${pivot.userData.label}은 벽 위에 배치할 수 없습니다.`);
+      updateEstimate();
+      return;
+    }
+    pivot.position.copy(safePosition);
+    pivot.userData.lastSafePosition = safePosition.clone();
+
+    if (!state.suppressAutoSelect && options.select !== false) {
+      selectFurniture(pivot, document.getElementById("furniture-toolbar"));
+    }
+    updateSafetyState();
+    updateEstimate();
+  }
+
+  function createCenteredFurniturePivot(model, item) {
+    const scaledBox = new THREE.Box3().setFromObject(model);
+    const center = scaledBox.getCenter(new THREE.Vector3());
+    const minY = scaledBox.min.y;
+    const pivot = new THREE.Group();
+    model.position.sub(center);
+    pivot.add(model);
+    pivot.name = item.product_name || "furniture";
+    pivot.userData = {
+      type: "furniture",
+      skuId: item.sku_id,
+      productName: item.product_name || "자재",
+      label: item.label || item.product_name || "자재",
+      category: item.category || "",
+      color: normalizeColor(item.color),
+      modelPath: item.model_path || resolveModelPath(item),
+      imageUrl: item.image_url || "",
+      productUrl: item.product_url || "",
+      price: parsePrice(item.price),
+      rawPrice: item.price,
+      size: item.size || "",
+      dimensions: {
+        width: Number(item.width) || 0,
+        depth: Number(item.depth) || 0,
+        height: Number(item.height) || 0,
+      },
+      centerY: center.y - minY,
+    };
+    pivot.traverse((obj) => {
+      obj.castShadow = true;
+      obj.receiveShadow = true;
+    });
+    return pivot;
+  }
+
+  function applyWallMagnetAndBounds(model, desiredPosition) {
+    const bounds = state.floorBounds;
+    if (!bounds) return { position: desiredPosition.clone(), message: "" };
+    const original = model.position.clone();
+    model.position.copy(desiredPosition);
+    const box = getPlanBox(model);
+    const position = desiredPosition.clone();
+    const messages = [];
+
+    const leftGap = box.minX - bounds.minX;
+    const rightGap = bounds.maxX - box.maxX;
+    const topGap = box.minZ - bounds.minZ;
+    const bottomGap = bounds.maxZ - box.maxZ;
+
+    if (leftGap < SNAP_DISTANCE) {
+      const delta = bounds.minX + WALL_BUFFER - box.minX;
+      position.x += delta;
+      messages.push("왼쪽 벽에 자석 스냅");
+    }
+    if (rightGap < SNAP_DISTANCE) {
+      const delta = bounds.maxX - WALL_BUFFER - box.maxX;
+      position.x += delta;
+      messages.push("오른쪽 벽에 자석 스냅");
+    }
+    if (topGap < SNAP_DISTANCE) {
+      const delta = bounds.minZ + WALL_BUFFER - box.minZ;
+      position.z += delta;
+      messages.push("상단 벽에 자석 스냅");
+    }
+    if (bottomGap < SNAP_DISTANCE) {
+      const delta = bounds.maxZ - WALL_BUFFER - box.maxZ;
+      position.z += delta;
+      messages.push("하단 벽에 자석 스냅");
+    }
+
+    model.position.copy(original);
+    return { position, message: messages.join(", ") };
+  }
+
+  function findNearestSafePosition(model, preferredPosition) {
+    const offsets = [
+      [0, 0],
+      [0.6, 0],
+      [-0.6, 0],
+      [0, 0.6],
+      [0, -0.6],
+      [1.2, 0],
+      [-1.2, 0],
+      [0, 1.2],
+      [0, -1.2],
+      [1.2, 1.2],
+      [-1.2, 1.2],
+      [1.2, -1.2],
+      [-1.2, -1.2],
+    ];
+
+    for (const [dx, dz] of offsets) {
+      const position = preferredPosition.clone();
+      position.x += dx;
+      position.z += dz;
+      const constrained = applyWallMagnetAndBounds(model, position).position;
+      if (!getBlockedPlacementAt(model, constrained)) return constrained;
+    }
+    return null;
+  }
+
+  function getBlockedPlacementAt(model, position) {
+    const original = model.position.clone();
+    model.position.copy(position);
+    const box = getPlanBox(model);
+    const reason = getBlockedPlacementReason(model, box);
+    model.position.copy(original);
+    return reason ? { reason, box } : null;
+  }
+
+  function getBlockedPlacementReason(model, box) {
+    if (isOutsideBounds(box)) return "평면도 경계 밖";
+    if (boxIntersectsImageWall(box)) return "이미지 평면도 벽";
+    for (const wall of state.wallObjects) {
+      if (boxesIntersect(getPlanBox(wall), box)) return "벡터 벽체";
+    }
+    return "";
+  }
+
+  function boxIntersectsImageWall(box) {
+    if (!state.imageWallMask || !state.floorBounds) return false;
+    const mask = state.imageWallMask;
+    const bounds = state.floorBounds;
+    const minPx = clamp(Math.floor(((box.minX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1);
+    const maxPx = clamp(Math.ceil(((box.maxX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1);
+    const minPy = clamp(Math.floor(((bounds.maxZ - box.maxZ) / bounds.depth) * mask.height), 0, mask.height - 1);
+    const maxPy = clamp(Math.ceil(((bounds.maxZ - box.minZ) / bounds.depth) * mask.height), 0, mask.height - 1);
+
+    const stepX = Math.max(1, Math.floor((maxPx - minPx + 1) / 32));
+    const stepY = Math.max(1, Math.floor((maxPy - minPy + 1) / 32));
+    let hits = 0;
+    let samples = 0;
+
+    for (let y = minPy; y <= maxPy; y += stepY) {
+      for (let x = minPx; x <= maxPx; x += stepX) {
+        samples += 1;
+        if (mask.mask[y * mask.width + x]) hits += 1;
+        if (hits >= 2 && hits / samples > 0.002) return true;
+      }
+    }
+    return hits >= 3;
+  }
+
+  function updateSafetyState(extraMessage) {
+    clearCollisionHelpers();
+    const warnings = [];
+    const colliding = new Set();
+    if (extraMessage) warnings.push(extraMessage);
+    if (state.blockedDragWarning) warnings.push(state.blockedDragWarning);
+
+    state.furnitureMeshes.forEach((model) => {
+      const box = getPlanBox(model);
+      const blockedReason = getBlockedPlacementReason(model, box);
+      if (blockedReason) {
+        warnings.push(`${model.userData.label}이 ${blockedReason}과 간섭됩니다.`);
+        colliding.add(model);
+      }
+    });
+
+    for (let i = 0; i < state.furnitureMeshes.length; i += 1) {
+      for (let j = i + 1; j < state.furnitureMeshes.length; j += 1) {
+        const a = state.furnitureMeshes[i];
+        const b = state.furnitureMeshes[j];
+        if (boxesIntersect(getPlanBox(a), getPlanBox(b))) {
+          warnings.push(`${a.userData.label} / ${b.userData.label} 간 충돌`);
+          colliding.add(a);
+          colliding.add(b);
+        }
+      }
+    }
+
+    colliding.forEach((model) => addCollisionHelper(model));
+    state.lastWarnings = unique(warnings).slice(0, 6);
+    renderWarnings();
+  }
+
+  function getPlanBox(object) {
+    const box = new THREE.Box3().setFromObject(object);
+    return { minX: box.min.x, maxX: box.max.x, minZ: box.min.z, maxZ: box.max.z };
+  }
+
+  function boxesIntersect(a, b) {
+    return a.minX <= b.maxX && a.maxX >= b.minX && a.minZ <= b.maxZ && a.maxZ >= b.minZ;
+  }
+
+  function isOutsideBounds(box) {
+    const bounds = state.floorBounds;
+    if (!bounds) return false;
+    return box.minX < bounds.minX || box.maxX > bounds.maxX || box.minZ < bounds.minZ || box.maxZ > bounds.maxZ;
+  }
+
+  function addCollisionHelper(model) {
+    const helper = new THREE.BoxHelper(model, 0xff2d2d);
+    state.scene.add(helper);
+    state.collisionHelpers.push(helper);
+  }
+
+  function addCollisionFootprint(box) {
+    const width = Math.max(box.maxX - box.minX, 0.08);
+    const depth = Math.max(box.maxZ - box.minZ, 0.08);
+    const geometry = new THREE.PlaneGeometry(width, depth);
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xff2d2d,
+      transparent: true,
+      opacity: 0.32,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set((box.minX + box.maxX) / 2, 0.045, (box.minZ + box.maxZ) / 2);
+    state.scene.add(mesh);
+    state.collisionHelpers.push(mesh);
+  }
+
+  function clearCollisionHelpers() {
+    state.collisionHelpers.forEach((helper) => {
+      state.scene.remove(helper);
+      helper.geometry.dispose();
+      helper.material.dispose();
+    });
+    state.collisionHelpers = [];
+  }
+
+  function renderWarnings() {
+    const panel = document.getElementById("warning-panel");
+    if (!panel) return;
+    panel.classList.toggle("ok", state.lastWarnings.length === 0);
+    panel.style.display = "grid";
+    if (state.lastWarnings.length === 0) {
+      panel.innerHTML = "<strong>배치 상태 양호</strong><span>충돌이나 벽 간섭이 없습니다.</span>";
+      return;
+    }
+    panel.innerHTML = `<strong>배치 경고</strong><span>${state.lastWarnings.join("<br>")}</span>`;
+  }
+
+  function updateEstimate() {
+    const placedCount = document.getElementById("placed-count");
+    const totalEl = document.getElementById("estimate-total");
+    const listEl = document.getElementById("estimate-list");
+    const activeTheme = document.getElementById("active-theme");
+    const total = state.furnitureMeshes.reduce((sum, model) => sum + (model.userData.price || 0), 0);
+
+    if (placedCount) placedCount.textContent = `${state.furnitureMeshes.length}개`;
+    if (totalEl) totalEl.textContent = formatPrice(total);
+    if (activeTheme) activeTheme.textContent = state.activePattern;
+    if (!listEl) return;
+    listEl.innerHTML = "";
+    if (state.furnitureMeshes.length === 0) {
+      listEl.innerHTML = '<div class="estimate-row"><strong>배치된 자재 없음</strong><span>카탈로그에서 선택하세요</span></div>';
+      return;
+    }
+    state.furnitureMeshes.forEach((model) => {
+      const row = document.createElement("div");
+      row.className = "estimate-row";
+      row.innerHTML = `<strong>${escapeHtml(model.userData.label)}</strong><b>${formatPrice(model.userData.price)}</b><span>${formatDimensions(model.userData.dimensions)}</span><span>${formatColorLabel(model.userData.color)}</span>`;
+      listEl.appendChild(row);
+    });
+  }
+
+  function applyTrendPattern(pattern) {
+    state.activePattern = pattern.code;
+    renderTrendPatterns();
+    clearFurniture();
+    state.suppressAutoSelect = true;
+    const picks = pattern.placements.map((placement) => {
+      return findCatalogItem(placement.category, pattern.color) || findCatalogItem(placement.category) || state.catalogItems[0];
+    }).filter(Boolean);
+    picks.forEach((item, index) => spawnFurniture(item, { ...pattern.placements[index], select: false }));
+    state.suppressAutoSelect = false;
+    updateSceneStatus("추천 패턴 적용", `${pattern.code} ${pattern.name} 기본 배치를 불러왔습니다.`);
+  }
+
+  function findCatalogItem(category, color) {
+    return state.catalogItems.find((item) => {
+      const categoryOk = !category || String(item.category || "").includes(category) || String(item.product_name || "").includes(category);
+      const colorOk = !color || normalizeColor(item.color) === color;
+      return categoryOk && colorOk;
+    });
+  }
+
+  function clearFurniture() {
+    clearSelectionHighlight();
+    clearCollisionHelpers();
+    state.furnitureMeshes.forEach((model) => {
+      state.scene.remove(model);
+      disposeObject3D(model);
+    });
+    state.furnitureMeshes = [];
+    state.selectedFurniture = null;
+    clearVisualization();
+    updateEstimate();
+  }
+
+  function acceptLayout() {
+    clearSelectionHighlight();
+    state.selectedFurniture = null;
+    const toolbar = document.getElementById("furniture-toolbar");
+    if (toolbar) toolbar.style.display = "none";
+    clearVisualization();
+    const bounds = calculateLayoutBounds();
+    const visualization = new THREE.Group();
+    visualization.name = "acceptedLayoutVisualization";
+    addPerimeterWalls(visualization, bounds);
+    addFloorFinish(visualization, bounds);
+    state.scene.add(visualization);
+    state.visualizationGroup = visualization;
+    focusCameraOnArea(bounds.width, bounds.depth, bounds.center);
+    updateSafetyState();
+    updateSceneStatus("3D 렌더링 완료", "벽체, 바닥, 배치 자재, 견적 상태가 갱신되었습니다.");
+  }
+
+  function calculateLayoutBounds() {
+    const bounds = state.floorBounds || { minX: -4, maxX: 4, minZ: -3, maxZ: 3 };
+    return {
+      minX: bounds.minX,
+      maxX: bounds.maxX,
+      minZ: bounds.minZ,
+      maxZ: bounds.maxZ,
+      width: bounds.maxX - bounds.minX,
+      depth: bounds.maxZ - bounds.minZ,
+      center: new THREE.Vector3((bounds.minX + bounds.maxX) / 2, 0, (bounds.minZ + bounds.maxZ) / 2),
+    };
+  }
+
+  function addPerimeterWalls(group, bounds) {
+    const wallHeight = 2.7;
+    const wallThickness = 0.12;
+    const material = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.72, transparent: true, opacity: 0.9 });
+    const north = createWall(bounds.width, wallHeight, wallThickness, material);
+    north.position.set(bounds.center.x, wallHeight / 2, bounds.minZ);
+    const south = createWall(bounds.width, wallHeight, wallThickness, material);
+    south.position.set(bounds.center.x, wallHeight / 2, bounds.maxZ);
+    const west = createWall(bounds.depth, wallHeight, wallThickness, material);
+    west.rotation.y = Math.PI / 2;
+    west.position.set(bounds.minX, wallHeight / 2, bounds.center.z);
+    const east = createWall(bounds.depth, wallHeight, wallThickness, material);
+    east.rotation.y = Math.PI / 2;
+    east.position.set(bounds.maxX, wallHeight / 2, bounds.center.z);
+    group.add(north, south, west, east);
+  }
+
+  function createWall(length, height, thickness, material) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(length, height, thickness), material.clone());
+    wall.receiveShadow = true;
+    wall.castShadow = true;
+    return wall;
+  }
+
+  function addFloorFinish(group, bounds) {
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(bounds.width, bounds.depth),
+      new THREE.MeshStandardMaterial({ color: 0xe5e7eb, roughness: 0.86, transparent: true, opacity: state.floorPlanGroup ? 0.22 : 1 })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(bounds.center.x, -0.004, bounds.center.z);
+    floor.receiveShadow = true;
+    group.add(floor);
+  }
+
+  function clearVisualization() {
+    if (!state.visualizationGroup) return;
+    state.scene.remove(state.visualizationGroup);
+    disposeObject3D(state.visualizationGroup);
+    state.visualizationGroup = null;
+  }
+
+  function saveLayout() {
+    const payload = {
+      savedAt: new Date().toISOString(),
+      activePattern: state.activePattern,
+      floorBounds: state.floorBounds,
+      items: state.furnitureMeshes.map((model) => ({
+        skuId: model.userData.skuId,
+        label: model.userData.label,
+        position: { x: model.position.x, y: model.position.y, z: model.position.z },
+        rotationY: model.rotation.y,
+        item: exportCatalogLikeItem(model),
+      })),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    downloadBlob(JSON.stringify(payload, null, 2), "duo-layout.json", "application/json");
+    updateSceneStatus("저장 완료", "브라우저 저장소와 duo-layout.json 파일로 현재 배치를 저장했습니다.");
+  }
+
+  function loadSavedLayout() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      alert("저장된 배치가 없습니다.");
+      return;
+    }
+    try {
+      const payload = JSON.parse(raw);
+      clearFurniture();
+      if (payload.floorBounds) setFloorBounds(payload.floorBounds);
+      state.activePattern = payload.activePattern || "A";
+      renderTrendPatterns();
+      state.suppressAutoSelect = true;
+      payload.items.forEach((entry) => {
+        const item = state.catalogItems.find((catalogItem) => catalogItem.sku_id === entry.skuId) || entry.item;
+        spawnFurniture({ ...item, label: entry.label }, { x: entry.position.x, z: entry.position.z, rot: entry.rotationY, select: false });
+      });
+      state.suppressAutoSelect = false;
+      updateSceneStatus("불러오기 완료", "저장된 배치를 복원했습니다.");
+    } catch (err) {
+      console.error(err);
+      alert("저장 데이터를 불러오지 못했습니다.");
+    }
+  }
+
+  function exportCatalogLikeItem(model) {
+    return {
+      sku_id: model.userData.skuId,
+      product_name: model.userData.productName,
+      label: model.userData.label,
+      category: model.userData.category,
+      color: model.userData.color,
+      price: model.userData.price,
+      size: model.userData.size,
+      model_path: model.userData.modelPath,
+      image_url: model.userData.imageUrl,
+      product_url: model.userData.productUrl,
+      width: model.userData.dimensions.width,
+      depth: model.userData.dimensions.depth,
+      height: model.userData.dimensions.height,
+    };
+  }
+
+  function downloadEstimatePdf() {
+    const rows = state.furnitureMeshes.map((model, index) => ({
+      index: String(index + 1),
+      label: model.userData.label,
+      category: model.userData.category || "-",
+      dimensions: formatDimensions(model.userData.dimensions),
+      color: formatColorLabel(model.userData.color),
+      price: formatPrice(model.userData.price),
+    }));
+    const total = state.furnitureMeshes.reduce((sum, model) => sum + (model.userData.price || 0), 0);
+    const html = createEstimatePrintHtml(rows, total);
+    const printWindow = window.open("", "_blank", "width=900,height=700");
+
+    if (!printWindow) {
+      downloadBlob(html, "duo-estimate.html", "text/html;charset=utf-8");
+      alert("팝업이 차단되어 HTML 견적서를 저장했습니다. 브라우저에서 열어 PDF로 저장해주세요.");
+      return;
+    }
+
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.setTimeout(() => {
+      printWindow.print();
+    }, 250);
+  }
+
+  function createEstimatePrintHtml(rows, total) {
+    const createdAt = new Date().toLocaleString("ko-KR");
+    const rowHtml = rows.length
+      ? rows.map((row) => `
+          <tr>
+            <td>${escapeHtml(row.index)}</td>
+            <td>${escapeHtml(row.label)}</td>
+            <td>${escapeHtml(row.category)}</td>
+            <td>${escapeHtml(row.dimensions)}</td>
+            <td>${escapeHtml(row.color)}</td>
+            <td class="price">${escapeHtml(row.price)}</td>
+          </tr>
+        `).join("")
+      : `<tr><td colspan="6" class="empty">배치된 자재가 없습니다.</td></tr>`;
+
+    return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>DuO 견적서</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      color: #111827;
+      font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", Arial, sans-serif;
+      margin: 0;
+      padding: 32px;
+    }
+    h1 { color: #002f5f; font-size: 24px; margin: 0 0 8px; }
+    .meta { color: #6b7280; display: flex; gap: 18px; font-size: 12px; margin-bottom: 24px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #e5e7eb; font-size: 12px; padding: 10px 8px; text-align: left; }
+    th { background: #f8fafc; color: #374151; font-weight: 700; }
+    .price { text-align: right; white-space: nowrap; }
+    .empty { color: #6b7280; padding: 24px; text-align: center; }
+    .total { align-items: center; display: flex; justify-content: flex-end; gap: 18px; margin-top: 20px; }
+    .total span { color: #6b7280; font-size: 13px; }
+    .total strong { color: #002f5f; font-size: 22px; }
+    @page { margin: 16mm; }
+  </style>
+</head>
+<body>
+  <h1>DuO 인테리어 기본 견적서</h1>
+  <div class="meta">
+    <span>생성일: ${escapeHtml(createdAt)}</span>
+    <span>추천 패턴: ${escapeHtml(state.activePattern)}</span>
+    <span>자재 수: ${rows.length}개</span>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>No.</th>
+        <th>자재명</th>
+        <th>분류</th>
+        <th>크기</th>
+        <th>색상</th>
+        <th class="price">금액</th>
+      </tr>
+    </thead>
+    <tbody>${rowHtml}</tbody>
+  </table>
+  <div class="total"><span>합계</span><strong>${escapeHtml(formatPrice(total))}</strong></div>
+</body>
+</html>`;
+  }
+
+  function downloadBlob(content, filename, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function disposeObject3D(object) {
+    object.traverse((obj) => {
+      if (obj.geometry) obj.geometry.dispose();
+      if (obj.material) {
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+        materials.forEach((material) => {
+          if (material.map) material.map.dispose();
+          material.dispose();
+        });
+      }
+    });
+  }
+
+  function focusCameraOnArea(width, depth, centerOverride) {
+    const center = centerOverride || new THREE.Vector3(width / 2, 0, depth / 2);
+    const distance = Math.max(width, depth) * 1.15 || 5;
+    state.camera.position.set(center.x + distance, distance, center.z + distance);
+    state.controls.target.copy(center);
+    state.controls.update();
+  }
+
+  function updateSceneStatus(title, detail) {
+    const status = document.getElementById("scene-status");
+    if (!status) return;
+    const titleEl = status.querySelector("strong");
+    const detailEl = status.querySelector("span");
+    if (titleEl) titleEl.textContent = title;
+    if (detailEl) detailEl.textContent = detail;
+  }
+
+  function onWindowResize() {
+    const container = getCanvasContainer();
+    state.camera.aspect = container.clientWidth / container.clientHeight;
+    state.camera.updateProjectionMatrix();
+    state.renderer.setSize(container.clientWidth, container.clientHeight);
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    state.controls.update();
+    state.renderer.render(state.scene, state.camera);
+  }
+
+  function resolveModelPath(item) {
+    const color = normalizeColor(item.color);
+    const category = String(item.category || "").toLowerCase();
+    if (category.includes("bed") || category.includes("침대")) {
+      const size = color === "black" || color === "white" ? "single" : "queen";
+      return `/static/models/bed/${size}_${color}_bed.glb`;
+    }
+    if (color === "blue") return "/static/models/curve_sofa/blue_curve_sofa.glb";
+    return `/static/models/sofa/${color}_sofa.glb`;
   }
 
   function normalizeColor(color) {
@@ -699,6 +1271,7 @@
 
   function formatColorLabel(color) {
     const normalized = normalizeColor(color);
+    if (normalized === "all") return "All";
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
   }
 
@@ -711,7 +1284,7 @@
     const w = formatNumber(item.width);
     const d = formatNumber(item.depth);
     const h = formatNumber(item.height);
-    return `${w}×${d}×${h}cm`;
+    return `${w}x${d}x${h}cm`;
   }
 
   function formatNumber(value) {
@@ -719,256 +1292,31 @@
     return Number.isInteger(num) ? String(num) : num.toFixed(1);
   }
 
+  function parsePrice(value) {
+    if (typeof value === "number") return value;
+    const digits = String(value || "0").replace(/[^\d.-]/g, "");
+    return Number(digits) || 0;
+  }
+
   function formatPrice(value) {
-    const num = Number(value) || 0;
-    return num.toLocaleString("ko-KR") + "원";
+    return parsePrice(value).toLocaleString("ko-KR") + "원";
   }
 
-  // =========================================================
-  // 5. 가구 배치 및 스케일링
-  // =========================================================
-  window.spawnFurniture = function (item) {
-    clearVisualization();
-    updateSceneStatus("Planning Mode", "Place furniture, rotate in-place, then accept to visualize.");
-    const path = item.model_path || resolveModelPath(item);
-
-    gltfLoader.load(
-      path,
-      (gltf) => onFurnitureModelLoaded(gltf, item),
-      undefined,
-      (err) => {
-        console.error("로드 실패", err);
-        if (path !== "/static/models/sofa/gray_sofa.glb") {
-          gltfLoader.load(
-            "/static/models/sofa/gray_sofa.glb",
-            (gltf) => onFurnitureModelLoaded(gltf, { ...item, model_path: "/static/models/sofa/gray_sofa.glb" }),
-            undefined,
-            (fallbackErr) => console.error("대체 모델 로드 실패", fallbackErr)
-          );
-        }
-      }
-    );
-  };
-
-  function resolveModelPath(item) {
-    const color = normalizeColor(item.color);
-    if (item.category && item.category.toLowerCase().includes("bed")) {
-      return `/static/models/bed/queen_${color}_bed.glb`;
-    }
-    if (color === "blue") {
-      return "/static/models/curve_sofa/blue_curve_sofa.glb";
-    }
-    return `/static/models/sofa/${color}_sofa.glb`;
+  function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
   }
 
-  function onFurnitureModelLoaded(gltf, item) {
-    const model = gltf.scene;
-
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-
-    const targetW = (item.width || 150) * 0.01;
-    const targetH = (item.height || 80) * 0.01;
-    const targetD = (item.depth || 80) * 0.01;
-
-    model.scale.set(targetW / size.x, targetH / size.y, targetD / size.z);
-
-    const pivot = createCenteredFurniturePivot(model, item);
-    pivot.position.set(0, pivot.userData.centerY || 0, 0);
-
-    state.scene.add(pivot);
-    state.furnitureMeshes.push(pivot);
-    selectFurniture(pivot, document.getElementById("furniture-toolbar"));
-    updateSceneMetrics();
+  function unique(values) {
+    return Array.from(new Set(values.filter(Boolean)));
   }
 
-  function createCenteredFurniturePivot(model, item) {
-    const scaledBox = new THREE.Box3().setFromObject(model);
-    const center = scaledBox.getCenter(new THREE.Vector3());
-    const minY = scaledBox.min.y;
-    const pivot = new THREE.Group();
-
-    model.position.sub(center);
-    pivot.add(model);
-    pivot.name = item.product_name || "furniture";
-    pivot.userData = {
-      type: "furniture",
-      skuId: item.sku_id,
-      productName: item.product_name,
-      color: normalizeColor(item.color),
-      modelPath: item.model_path || resolveModelPath(item),
-      dimensions: {
-        width: Number(item.width) || 0,
-        depth: Number(item.depth) || 0,
-        height: Number(item.height) || 0,
-      },
-      centerY: center.y - minY,
-    };
-
-    pivot.traverse((obj) => {
-      obj.castShadow = true;
-      obj.receiveShadow = true;
-    });
-
-    return pivot;
-  }
-
-  function updateSceneMetrics() {
-    const placedCount = document.getElementById("placed-count");
-    const activeTheme = document.getElementById("active-theme");
-    if (placedCount) placedCount.textContent = String(state.furnitureMeshes.length);
-    if (activeTheme) activeTheme.textContent = formatColorLabel(state.activeColor);
-  }
-
-  function acceptLayout() {
-    if (state.furnitureMeshes.length === 0 && !state.floorPlanGroup) {
-      updateSceneStatus("Ready", "Upload a floor plan or place furniture before accepting.");
-      return;
-    }
-
-    clearSelectionHighlight();
-    state.selectedFurniture = null;
-    const toolbar = document.getElementById("furniture-toolbar");
-    if (toolbar) toolbar.style.display = "none";
-
-    clearVisualization();
-
-    const bounds = calculateLayoutBounds();
-    const visualization = new THREE.Group();
-    visualization.name = "acceptedLayoutVisualization";
-    addPerimeterWalls(visualization, bounds);
-    addFloorFinish(visualization, bounds);
-
-    state.scene.add(visualization);
-    state.visualizationGroup = visualization;
-
-    focusCameraOnArea(bounds.width, bounds.depth, bounds.center);
-    updateSceneStatus(
-      "Visualization Accepted",
-      `${state.furnitureMeshes.length} objects rendered with floor plan and perimeter walls.`
-    );
-  }
-
-  function clearVisualization() {
-    if (!state.visualizationGroup) return;
-    state.scene.remove(state.visualizationGroup);
-    disposeObject3D(state.visualizationGroup);
-    state.visualizationGroup = null;
-  }
-
-  function calculateLayoutBounds() {
-    const box = new THREE.Box3();
-    let hasBounds = false;
-
-    if (state.floorPlanGroup) {
-      box.expandByObject(state.floorPlanGroup);
-      hasBounds = true;
-    }
-
-    state.furnitureMeshes.forEach((model) => {
-      box.expandByObject(model);
-      hasBounds = true;
-    });
-
-    if (!hasBounds || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) {
-      box.setFromCenterAndSize(new THREE.Vector3(0, 0, 0), new THREE.Vector3(8, 0.1, 6));
-    }
-
-    const padding = 0.8;
-    box.min.x -= padding;
-    box.min.z -= padding;
-    box.max.x += padding;
-    box.max.z += padding;
-
-    const size = box.getSize(new THREE.Vector3());
-    const center = box.getCenter(new THREE.Vector3());
-    center.y = 0;
-
-    return {
-      minX: box.min.x,
-      maxX: box.max.x,
-      minZ: box.min.z,
-      maxZ: box.max.z,
-      width: Math.max(size.x, 2),
-      depth: Math.max(size.z, 2),
-      center,
-    };
-  }
-
-  function addPerimeterWalls(group, bounds) {
-    const wallHeight = 2.7;
-    const wallThickness = 0.12;
-    const wallMaterial = new THREE.MeshStandardMaterial({
-      color: 0xf8fafc,
-      roughness: 0.72,
-      metalness: 0.02,
-      transparent: true,
-      opacity: 0.9,
-    });
-
-    const north = createWall(bounds.width, wallHeight, wallThickness, wallMaterial);
-    north.position.set(bounds.center.x, wallHeight / 2, bounds.minZ);
-
-    const south = createWall(bounds.width, wallHeight, wallThickness, wallMaterial);
-    south.position.set(bounds.center.x, wallHeight / 2, bounds.maxZ);
-
-    const west = createWall(bounds.depth, wallHeight, wallThickness, wallMaterial);
-    west.rotation.y = Math.PI / 2;
-    west.position.set(bounds.minX, wallHeight / 2, bounds.center.z);
-
-    const east = createWall(bounds.depth, wallHeight, wallThickness, wallMaterial);
-    east.rotation.y = Math.PI / 2;
-    east.position.set(bounds.maxX, wallHeight / 2, bounds.center.z);
-
-    group.add(north, south, west, east);
-  }
-
-  function createWall(length, height, thickness, material) {
-    const geometry = new THREE.BoxGeometry(length, height, thickness);
-    const wall = new THREE.Mesh(geometry, material.clone());
-    wall.receiveShadow = true;
-    wall.castShadow = true;
-    return wall;
-  }
-
-  function addFloorFinish(group, bounds) {
-    const geometry = new THREE.PlaneGeometry(bounds.width, bounds.depth);
-    const material = new THREE.MeshStandardMaterial({
-      color: 0xe5e7eb,
-      roughness: 0.86,
-      metalness: 0,
-      transparent: true,
-      opacity: state.floorPlanGroup ? 0.22 : 1,
-    });
-    const floor = new THREE.Mesh(geometry, material);
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.set(bounds.center.x, -0.004, bounds.center.z);
-    floor.receiveShadow = true;
-    group.add(floor);
-  }
-
-  function updateSceneStatus(title, detail) {
-    const status = document.getElementById("scene-status");
-    if (!status) return;
-    const titleEl = status.querySelector("strong");
-    const detailEl = status.querySelector("span");
-    if (titleEl) titleEl.textContent = title;
-    if (detailEl) detailEl.textContent = detail;
-  }
-
-  // =========================================================
-  // 6. 리사이즈 / 렌더 루프
-  // =========================================================
-  function onWindowResize() {
-    const container = getCanvasContainer();
-    state.camera.aspect = container.clientWidth / container.clientHeight;
-    state.camera.updateProjectionMatrix();
-    state.renderer.setSize(container.clientWidth, container.clientHeight);
-  }
-
-  function animate() {
-    requestAnimationFrame(animate);
-    state.controls.update();
-    state.renderer.render(state.scene, state.camera);
+  function escapeHtml(value) {
+    return String(value || "").replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#039;",
+    }[char]));
   }
 })();

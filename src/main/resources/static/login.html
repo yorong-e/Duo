@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Smart 3D Interior Planner</title>
+  <link rel="icon" href="data:;base64,iVBORw0KGgo=">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="auth-page">
+  <header id="top-nav">
+    <a class="logo logo-link" href="/">
+      <img src="https://www.hec.co.kr/assets/images/common/logo.svg" alt="현대엔지니어링" height="30">
+      <div>
+        <strong>Smart 3D Interior Planner</strong>
+        <span>Hyundai Engineering</span>
+      </div>
+    </a>
+    <div class="nav-actions">
+      <a class="nav-link" href="/signup.html">Sign Up</a>
+      <a class="primary-link" href="/">Planner</a>
+    </div>
+  </header>
+
+  <main class="auth-main">
+    <section class="auth-card" aria-labelledby="login-title">
+      <div class="auth-heading">
+        <span>Account Access</span>
+        <h1 id="login-title">Login</h1>
+      </div>
+
+      <form id="login-form" class="auth-form" novalidate>
+        <div class="field-group">
+          <label for="login-username">아이디</label>
+          <input id="login-username" name="username" type="text" autocomplete="username" required>
+          <p class="field-error" data-error-for="username"></p>
+        </div>
+
+        <div class="field-group">
+          <label for="login-password">비밀번호</label>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+          <p class="field-error" data-error-for="password"></p>
+        </div>
+
+        <label class="check-row">
+          <input name="remember" type="checkbox">
+          <span>로그인 상태 유지</span>
+        </label>
+
+        <p id="login-message" class="form-message" role="status"></p>
+
+        <button class="primary-btn auth-submit" type="submit">Login</button>
+      </form>
+
+      <p class="auth-switch">계정이 없으신가요? <a href="/signup.html">Sign Up</a></p>
+    </section>
+  </main>
+
+  <script src="/static/js/auth.js"></script>
+</body>
+</html>

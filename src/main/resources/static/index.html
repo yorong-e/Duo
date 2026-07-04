@@ -18,6 +18,10 @@
       </div>
     </div>
     <div class="nav-actions">
+      <a class="nav-link" href="/login.html" data-auth-guest>Login</a>
+      <a class="nav-link" href="/signup.html" data-auth-guest>Sign Up</a>
+      <span class="nav-user" data-auth-user hidden></span>
+      <button class="secondary-btn" type="button" data-auth-logout hidden>Logout</button>
       <label for="floorPlanInput" class="upload-btn">평면도 업로드</label>
       <input type="file" id="floorPlanInput" accept=".json" style="display: none;">
       <button id="btn-accept" class="primary-btn" type="button">Accept</button>
@@ -64,6 +68,7 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/DragControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="/static/js/auth-nav.js"></script>
   <script src="/static/js/main.js"></script>
 </body>
 </html>

@@ -1,16 +1,13 @@
 package com.duo.app.service;
 
 import com.duo.app.model.UserAccount;
+import com.duo.app.repository.UserRepository;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.Base64;
-import java.util.Locale;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Service;
 
@@ -21,36 +18,35 @@ public class AuthService {
     private static final Pattern EMAIL_PATTERN = Pattern.compile("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$");
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
-    private final AtomicLong sequence = new AtomicLong(1);
-    private final ConcurrentMap<String, UserAccount> usersByUsername = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, String> usernameByEmail = new ConcurrentHashMap<>();
+    private final UserRepository userRepository;
+
+    public AuthService(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
 
     public UserAccount signUp(SignUpCommand command) {
         validateSignUp(command);
 
-        String usernameKey = normalizeUsername(command.username());
-        String emailKey = normalizeEmail(command.email());
-        String salt = createSalt();
-        UserAccount account = new UserAccount(
-                sequence.getAndIncrement(),
-                command.name().trim(),
-                command.username().trim(),
-                command.email().trim(),
-                hashPassword(command.password(), salt),
-                salt);
+        String username = command.username().trim();
+        String email = command.email().trim();
 
-        UserAccount existingUser = usersByUsername.putIfAbsent(usernameKey, account);
-        if (existingUser != null) {
+        if (userRepository.existsByUsername(username)) {
             throw new AuthValidationException("username", "이미 사용 중인 아이디입니다.");
         }
-
-        String existingEmailOwner = usernameByEmail.putIfAbsent(emailKey, usernameKey);
-        if (existingEmailOwner != null) {
-            usersByUsername.remove(usernameKey);
+        if (userRepository.existsByEmail(email)) {
             throw new AuthValidationException("email", "이미 사용 중인 이메일입니다.");
         }
 
-        return account;
+        String salt = createSalt();
+        UserAccount account = new UserAccount(
+                0,
+                command.name().trim(),
+                username,
+                email,
+                hashPassword(command.password(), salt),
+                salt);
+
+        return userRepository.save(account);
     }
 
     public UserAccount login(LoginCommand command) {
@@ -63,7 +59,7 @@ public class AuthService {
             throw new AuthValidationException("password", "비밀번호를 입력해주세요.");
         }
 
-        UserAccount account = usersByUsername.get(normalizeUsername(username));
+        UserAccount account = userRepository.findByUsername(username).orElse(null);
         if (account == null || !account.passwordHash().equals(hashPassword(password, account.passwordSalt()))) {
             throw new AuthValidationException(null, "아이디 또는 비밀번호가 올바르지 않습니다.");
         }
@@ -71,17 +67,17 @@ public class AuthService {
     }
 
     public boolean isUsernameAvailable(String username) {
-        String normalized = normalizeUsername(username);
-        return !normalized.isBlank() && !usersByUsername.containsKey(normalized);
+        String normalized = username == null ? "" : username.trim();
+        return !normalized.isBlank() && !userRepository.existsByUsername(normalized);
     }
 
     public boolean isEmailAvailable(String email) {
-        String normalized = normalizeEmail(email);
-        return !normalized.isBlank() && !usernameByEmail.containsKey(normalized);
+        String normalized = email == null ? "" : email.trim();
+        return !normalized.isBlank() && !userRepository.existsByEmail(normalized);
     }
 
     public Optional<UserAccount> findByUsername(String username) {
-        return Optional.ofNullable(usersByUsername.get(normalizeUsername(username)));
+        return userRepository.findByUsername(username == null ? "" : username.trim());
     }
 
     private void validateSignUp(SignUpCommand command) {
@@ -106,14 +102,6 @@ public class AuthService {
         if (!password.equals(confirmPassword)) {
             throw new AuthValidationException("confirmPassword", "비밀번호가 일치하지 않습니다.");
         }
-    }
-
-    private String normalizeUsername(String username) {
-        return username == null ? "" : username.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private String normalizeEmail(String email) {
-        return email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
     }
 
     private String createSalt() {

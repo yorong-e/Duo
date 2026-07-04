@@ -8,6 +8,16 @@
   const WALL_BUFFER = 0.04;
   const IMAGE_WALL_DARKNESS = 92;
   const IMAGE_WALL_ALPHA = 24;
+  const FLOOR_COLOR_TOLERANCE = 64;
+  const MIN_FLOOR_COMPONENT_PIXELS = 180;
+  const IMAGE_FLOOR_SAMPLE_GRID = 5;
+  const IMAGE_FLOOR_REQUIRED_RATIO = 0.48;
+  const MIN_WALL_COMPONENT_PIXELS = 80;
+  const MIN_WALL_COMPONENT_LONG_SIDE = 32;
+  const IMAGE_WALL_HIT_RATIO = 0.0015;
+  const IMAGE_DOOR_HIT_RATIO = 0.0009;
+  const DOOR_SWING_SAMPLE_STEP = 0.06;
+  const COLLISION_EPSILON = 0.012;
 
   const COLOR_FILTERS = [
     { value: "all", label: "All", swatch: "linear-gradient(135deg, #f8fafc, #004b87)" },
@@ -65,8 +75,11 @@
     floorPlanGroup: null,
     visualizationGroup: null,
     floorBounds: null,
+    imageFloorMask: null,
     imageWallMask: null,
+    imageDoorSwingMask: null,
     wallObjects: [],
+    doorSwingZones: [],
     furnitureMeshes: [],
     selectedFurniture: null,
     selectionHelper: null,
@@ -200,14 +213,12 @@
     );
     const snapped = applyWallMagnetAndBounds(state.selectedFurniture, next);
     const blocked = getBlockedPlacementAt(state.selectedFurniture, snapped.position);
+    state.selectedFurniture.position.copy(snapped.position);
     if (blocked) {
-      const safe = state.selectedFurniture.userData.lastSafePosition;
-      if (safe) state.selectedFurniture.position.copy(safe);
-      state.blockedDragWarning = `${state.selectedFurniture.userData.label}은 벽 위에 배치할 수 없습니다.`;
+      state.blockedDragWarning = `${state.selectedFurniture.userData.label}은 ${blocked.reason}에 배치할 수 없습니다.`;
       updateSafetyState(snapped.message);
       addCollisionFootprint(blocked.box);
     } else {
-      state.selectedFurniture.position.copy(snapped.position);
       state.selectedFurniture.userData.lastSafePosition = snapped.position.clone();
       state.blockedDragWarning = "";
       updateSafetyState(snapped.message);
@@ -357,17 +368,21 @@
       const group = new THREE.Group();
       group.name = "floorPlan";
       group.add(mesh);
+      addDoorsToGroup(group, planData, {
+        scale,
+        toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: planeH / 2 - point.y * scale }),
+      });
       state.scene.add(group);
       state.floorPlanGroup = group;
       setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
-      buildImageWallMask(imageDataUri, attrs.width, attrs.height, planeW, planeH);
+      buildImageFloorMask(imageDataUri, attrs.width, attrs.height, planeW, planeH);
       focusCameraOnArea(planeW, planeH, new THREE.Vector3(0, 0, 0));
-      updateSceneStatus("평면도 로드 완료", "검은 도면선을 벽으로 인식해 가구 배치를 제한합니다.");
+      updateSceneStatus("평면도 로드 완료", "타일 바닥색 영역만 가구 배치 가능 영역으로 인식합니다.");
       updateSafetyState();
     });
   }
 
-  function buildImageWallMask(imageDataUri, width, height, planeW, planeH) {
+  function buildImageFloorMask(imageDataUri, width, height, planeW, planeH) {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement("canvas");
@@ -376,8 +391,11 @@
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(img, 0, 0, width, height);
       const rgba = ctx.getImageData(0, 0, width, height).data;
-      const mask = new Uint8Array(width * height);
-      let wallPixels = 0;
+      const tileColor = inferTileColor(rgba);
+      const inferredTileIsBeige = isBeigeTileColor(tileColor);
+      const candidateMask = new Uint8Array(width * height);
+      const wallCandidateMask = new Uint8Array(width * height);
+      let candidatePixels = 0;
 
       for (let i = 0, p = 0; i < rgba.length; i += 4, p += 1) {
         const r = rgba[i];
@@ -385,27 +403,259 @@
         const b = rgba[i + 2];
         const a = rgba[i + 3];
         const darkness = (r + g + b) / 3;
+        const color = { r, g, b };
+        const nearTile = inferredTileIsBeige && colorDistance(color, tileColor) <= FLOOR_COLOR_TOLERANCE;
+        if (a > IMAGE_WALL_ALPHA && darkness > IMAGE_WALL_DARKNESS && (isBeigeTileColor(color) || nearTile)) {
+          candidateMask[p] = 1;
+          candidatePixels += 1;
+        }
         if (a > IMAGE_WALL_ALPHA && darkness < IMAGE_WALL_DARKNESS) {
-          mask[p] = 1;
-          wallPixels += 1;
+          wallCandidateMask[p] = 1;
         }
       }
 
-      state.imageWallMask = {
+      let mask = cleanImageFloorMask(candidateMask, width, height);
+      let floorPixels = countMaskPixels(mask);
+      if (floorPixels === 0 && candidatePixels > 0) {
+        mask = candidateMask;
+        floorPixels = candidatePixels;
+      }
+      state.imageFloorMask = {
         width,
         height,
         planeW,
         planeH,
         mask,
+        integral: buildMaskIntegral(mask, width, height),
       };
-      updateSceneStatus("벽 마스크 분석 완료", `검은 벽 픽셀 ${wallPixels.toLocaleString("ko-KR")}개를 배치 금지 영역으로 설정했습니다.`);
+      const darkMasks = classifyDarkImageMasks(wallCandidateMask, width, height);
+      const wallMask = darkMasks.wallMask;
+      const doorMask = darkMasks.doorMask;
+      const wallPixels = countMaskPixels(wallMask);
+      const doorPixels = countMaskPixels(doorMask);
+      state.imageWallMask = {
+        width,
+        height,
+        mask: wallMask,
+        integral: buildMaskIntegral(wallMask, width, height),
+      };
+      state.imageDoorSwingMask = {
+        width,
+        height,
+        mask: doorMask,
+        integral: buildMaskIntegral(doorMask, width, height),
+      };
+      updateSceneStatus(
+        "바닥색 분석 완료",
+        `베이지 바닥 ${floorPixels.toLocaleString("ko-KR")}개, 벽선 ${wallPixels.toLocaleString("ko-KR")}개, 문 궤적 ${doorPixels.toLocaleString("ko-KR")}개를 인식했습니다.`
+      );
       updateSafetyState();
     };
     img.onerror = () => {
+      state.imageFloorMask = null;
       state.imageWallMask = null;
-      updateSceneStatus("벽 마스크 분석 실패", "평면도 이미지는 표시되지만 검은 벽 충돌 분석은 적용되지 않았습니다.");
+      state.imageDoorSwingMask = null;
+      updateSceneStatus("바닥색 분석 실패", "평면도 이미지는 표시되지만 타일색 배치 제한은 적용되지 않았습니다.");
     };
     img.src = imageDataUri;
+  }
+
+  function isBeigeTileColor(color) {
+    const { r, g, b } = color;
+    const brightness = (r + g + b) / 3;
+    const warmEnough = r >= g - 18 && g >= b - 8 && r >= b + 10;
+    const notTooRed = r - g <= 58;
+    const muted = Math.max(r, g, b) - Math.min(r, g, b) <= 96;
+    return brightness >= 132 && brightness <= 248 && warmEnough && notTooRed && muted;
+  }
+
+  function inferTileColor(rgba) {
+    const buckets = new Map();
+    let fallback = { r: 230, g: 230, b: 230 };
+    let fallbackCount = 0;
+
+    for (let i = 0; i < rgba.length; i += 4) {
+      const r = rgba[i];
+      const g = rgba[i + 1];
+      const b = rgba[i + 2];
+      const a = rgba[i + 3];
+      const brightness = (r + g + b) / 3;
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      if (a <= IMAGE_WALL_ALPHA || brightness <= IMAGE_WALL_DARKNESS || brightness >= 252 || chroma > 72) continue;
+      const key = `${Math.round(r / 12) * 12},${Math.round(g / 12) * 12},${Math.round(b / 12) * 12}`;
+      const bucket = buckets.get(key) || { r: 0, g: 0, b: 0, count: 0 };
+      bucket.r += r;
+      bucket.g += g;
+      bucket.b += b;
+      bucket.count += 1;
+      buckets.set(key, bucket);
+      if (bucket.count > fallbackCount) {
+        fallbackCount = bucket.count;
+        fallback = {
+          r: bucket.r / bucket.count,
+          g: bucket.g / bucket.count,
+          b: bucket.b / bucket.count,
+        };
+      }
+    }
+
+    return fallback;
+  }
+
+  function colorDistance(a, b) {
+    const dr = a.r - b.r;
+    const dg = a.g - b.g;
+    const db = a.b - b.b;
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
+  function cleanImageFloorMask(rawMask, width, height) {
+    const total = width * height;
+    const visited = new Uint8Array(total);
+    const cleaned = new Uint8Array(total);
+    const queue = [];
+    const minArea = Math.max(MIN_FLOOR_COMPONENT_PIXELS, Math.floor(total * 0.0003));
+
+    for (let start = 0; start < total; start += 1) {
+      if (!rawMask[start] || visited[start]) continue;
+
+      let head = 0;
+      let count = 0;
+      let minX = width;
+      let maxX = 0;
+      let minY = height;
+      let maxY = 0;
+
+      queue.length = 0;
+      queue.push(start);
+      visited[start] = 1;
+
+      while (head < queue.length) {
+        const index = queue[head++];
+        const x = index % width;
+        const y = Math.floor(index / width);
+        count += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+
+        visitMaskNeighbor(index - 1, x > 0);
+        visitMaskNeighbor(index + 1, x < width - 1);
+        visitMaskNeighbor(index - width, y > 0);
+        visitMaskNeighbor(index + width, y < height - 1);
+      }
+
+      const componentWidth = maxX - minX + 1;
+      const componentHeight = maxY - minY + 1;
+      const density = count / Math.max(componentWidth * componentHeight, 1);
+      const touchesBorder = minX === 0 || minY === 0 || maxX === width - 1 || maxY === height - 1;
+      const floorLike = count >= minArea && density >= 0.08 && !touchesBorder;
+
+      if (floorLike) {
+        for (const index of queue) cleaned[index] = 1;
+      }
+
+      function visitMaskNeighbor(index, inBounds) {
+        if (!inBounds || visited[index] || !rawMask[index]) return;
+        visited[index] = 1;
+        queue.push(index);
+      }
+    }
+
+    return cleaned;
+  }
+
+  function classifyDarkImageMasks(rawMask, width, height) {
+    const total = width * height;
+    const visited = new Uint8Array(total);
+    const wallMask = new Uint8Array(total);
+    const doorMask = new Uint8Array(total);
+    const queue = [];
+    const minArea = Math.max(MIN_WALL_COMPONENT_PIXELS, Math.floor(total * 0.00002));
+    const minLongSide = Math.max(MIN_WALL_COMPONENT_LONG_SIDE, Math.floor(Math.min(width, height) * 0.01));
+
+    for (let start = 0; start < total; start += 1) {
+      if (!rawMask[start] || visited[start]) continue;
+
+      let head = 0;
+      let count = 0;
+      let minX = width;
+      let maxX = 0;
+      let minY = height;
+      let maxY = 0;
+
+      queue.length = 0;
+      queue.push(start);
+      visited[start] = 1;
+
+      while (head < queue.length) {
+        const index = queue[head++];
+        const x = index % width;
+        const y = Math.floor(index / width);
+        count += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+
+        visitMaskNeighbor(index - 1, x > 0);
+        visitMaskNeighbor(index + 1, x < width - 1);
+        visitMaskNeighbor(index - width, y > 0);
+        visitMaskNeighbor(index + width, y < height - 1);
+      }
+
+      const componentWidth = maxX - minX + 1;
+      const componentHeight = maxY - minY + 1;
+      const longSide = Math.max(componentWidth, componentHeight);
+      const shortSide = Math.max(Math.min(componentWidth, componentHeight), 1);
+      const aspect = longSide / shortSide;
+      const density = count / Math.max(componentWidth * componentHeight, 1);
+      const lineLike = longSide >= minLongSide && aspect >= 2.8;
+      const outlineLike = count >= minArea * 4 && longSide >= minLongSide * 2;
+      const tooSmallForWall = count < minArea || longSide < minLongSide;
+      const arcLike = count >= Math.max(58, Math.floor(minArea * 0.7))
+        && longSide >= minLongSide
+        && aspect < 2.8
+        && density >= 0.012
+        && density <= 0.34;
+      const wallLike = !tooSmallForWall && density >= 0.006 && (lineLike || outlineLike) && !arcLike;
+
+      if (wallLike) {
+        for (const index of queue) wallMask[index] = 1;
+      } else if (arcLike) {
+        for (const index of queue) doorMask[index] = 1;
+      }
+
+      function visitMaskNeighbor(index, inBounds) {
+        if (!inBounds || visited[index] || !rawMask[index]) return;
+        visited[index] = 1;
+        queue.push(index);
+      }
+    }
+
+    return { wallMask, doorMask };
+  }
+
+  function countMaskPixels(mask) {
+    let count = 0;
+    for (let i = 0; i < mask.length; i += 1) {
+      if (mask[i]) count += 1;
+    }
+    return count;
+  }
+
+  function buildMaskIntegral(mask, width, height) {
+    const integral = new Uint32Array((width + 1) * (height + 1));
+    for (let y = 0; y < height; y += 1) {
+      let rowSum = 0;
+      for (let x = 0; x < width; x += 1) {
+        rowSum += mask[y * width + x];
+        const dest = (y + 1) * (width + 1) + x + 1;
+        integral[dest] = integral[dest - width - 1] + rowSum;
+      }
+    }
+    return integral;
   }
 
   function getFloorPlanPixelSize(planData) {
@@ -423,7 +673,10 @@
     group.name = "floorPlan";
     state.wallObjects = [];
     planData.walls.forEach((wall) => addWallToGroup(group, wall));
-    if (Array.isArray(planData.doors)) planData.doors.forEach((door) => addDoorMarkerToGroup(group, door));
+    addDoorsToGroup(group, planData, {
+      scale: MM_TO_SCENE,
+      toScenePoint: (point) => ({ x: point.x * MM_TO_SCENE, z: point.y * MM_TO_SCENE }),
+    });
     state.scene.add(group);
     state.floorPlanGroup = group;
 
@@ -457,16 +710,119 @@
     state.wallObjects.push(mesh);
   }
 
-  function addDoorMarkerToGroup(group, door) {
-    if (typeof door.x !== "number" || typeof door.y !== "number") return;
-    const radius = (door.radius || 900) * MM_TO_SCENE;
+  function addDoorsToGroup(group, planData, transform) {
+    getDoorEntries(planData).forEach((door) => addDoorMarkerToGroup(group, door, transform));
+  }
+
+  function getDoorEntries(planData) {
+    const singleDoor = planData.door && !Array.isArray(planData.door) ? [planData.door] : [];
+    return []
+      .concat(Array.isArray(planData.doors) ? planData.doors : [])
+      .concat(Array.isArray(planData.door) ? planData.door : [])
+      .concat(singleDoor)
+      .concat(Array.isArray(planData.openings) ? planData.openings.filter((entry) => String(entry.type || "").toLowerCase().includes("door")) : [])
+      .concat(Array.isArray(planData.doorOpenings) ? planData.doorOpenings : []);
+  }
+
+  function addDoorMarkerToGroup(group, door, transform) {
+    const zone = createDoorSwingZone(door, transform);
+    if (!zone) return;
+    const radius = zone.radius;
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(Math.max(radius - 0.02, 0.01), radius, 32),
       new THREE.MeshBasicMaterial({ color: 0x004b87, side: THREE.DoubleSide, transparent: true, opacity: 0.5 })
     );
     ring.rotation.x = -Math.PI / 2;
-    ring.position.set(door.x * MM_TO_SCENE, 0.02, door.y * MM_TO_SCENE);
+    ring.position.set(zone.x, 0.02, zone.z);
     group.add(ring);
+    state.doorSwingZones.push(zone);
+  }
+
+  function createDoorSwingZone(door, transform) {
+    transform = transform || {
+      scale: MM_TO_SCENE,
+      toScenePoint: (point) => ({ x: point.x * MM_TO_SCENE, z: point.y * MM_TO_SCENE }),
+    };
+    const hinge = readDoorPoint(door, [
+      ["hingeX", "hingeY"],
+      ["hingeX", "hingeZ"],
+      ["x", "y"],
+      ["centerX", "centerY"],
+      ["cx", "cy"],
+      ["x1", "y1"],
+    ]);
+    if (!hinge) return null;
+
+    const leafEnd = readDoorPoint(door, [
+      ["x2", "y2"],
+      ["endX", "endY"],
+      ["leafX", "leafY"],
+      ["toX", "toY"],
+    ]);
+    const hingeScene = transform.toScenePoint(hinge);
+    const segmentRadius = leafEnd ? distance2D(hinge, leafEnd) : NaN;
+    const radius = firstNumber(door.radius, door.width, door.length, door.doorWidth, segmentRadius, 900) * transform.scale;
+    if (!Number.isFinite(hingeScene.x) || !Number.isFinite(hingeScene.z) || !Number.isFinite(radius) || radius <= 0) return null;
+
+    const start = readDoorAngle(door, ["startAngle", "start", "angleStart", "fromAngle"]);
+    const end = readDoorAngle(door, ["endAngle", "end", "angleEnd", "toAngle"]);
+    if (start != null && end != null) {
+      return { x: hingeScene.x, z: hingeScene.z, radius, startAngle: start, endAngle: end, fullCircle: false };
+    }
+
+    const base = readDoorAngle(door, ["angle", "rotation", "direction"])
+      ?? (leafEnd ? angleBetweenScenePoints(transform.toScenePoint(hinge), transform.toScenePoint(leafEnd)) : 0);
+    const swing = readDoorAngle(door, ["swingAngle", "openAngle"]) || Math.PI / 2;
+    const signHint = String(door.swing || door.hand || door.open || door.direction || "").toLowerCase();
+    const sign = signHint.includes("left") || signHint.includes("counter") || signHint.includes("ccw") ? -1 : 1;
+    return { x: hingeScene.x, z: hingeScene.z, radius, startAngle: base, endAngle: base + swing * sign, fullCircle: false };
+  }
+
+  function readDoorPoint(source, pairs) {
+    for (const [xKey, yKey] of pairs) {
+      const x = Number(source[xKey]);
+      const y = Number(source[yKey]);
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    }
+    if (source.hinge && typeof source.hinge === "object") {
+      const x = firstNumber(source.hinge.x, source.hinge.x1, source.hinge.centerX);
+      const y = firstNumber(source.hinge.y, source.hinge.z, source.hinge.y1, source.hinge.centerY);
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    }
+    if (source.center && typeof source.center === "object") {
+      const x = firstNumber(source.center.x, source.center.centerX);
+      const y = firstNumber(source.center.y, source.center.z, source.center.centerY);
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    }
+    return null;
+  }
+
+  function distance2D(a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function angleBetweenScenePoints(a, b) {
+    return Math.atan2(b.z - a.z, b.x - a.x);
+  }
+
+  function firstNumber(...values) {
+    for (const value of values) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return NaN;
+  }
+
+  function readDoorAngle(source, keys) {
+    for (const key of keys) {
+      if (source[key] == null) continue;
+      const value = Number(source[key]);
+      if (!Number.isFinite(value)) continue;
+      return Math.abs(value) > Math.PI * 2 ? value * Math.PI / 180 : value;
+    }
+    return null;
   }
 
   function setFloorBounds(bounds) {
@@ -487,8 +843,11 @@
       disposeObject3D(state.floorPlanGroup);
     }
     state.floorPlanGroup = null;
+    state.imageFloorMask = null;
     state.imageWallMask = null;
+    state.imageDoorSwingMask = null;
     state.wallObjects = [];
+    state.doorSwingZones = [];
     clearVisualization();
   }
 
@@ -659,17 +1018,10 @@
     state.scene.add(pivot);
     state.furnitureMeshes.push(pivot);
     const constrained = applyWallMagnetAndBounds(pivot, pivot.position);
-    const safePosition = findNearestSafePosition(pivot, constrained.position);
-    if (!safePosition) {
-      state.scene.remove(pivot);
-      state.furnitureMeshes = state.furnitureMeshes.filter((model) => model !== pivot);
-      disposeObject3D(pivot);
-      updateSafetyState(`${pivot.userData.label}은 벽 위에 배치할 수 없습니다.`);
-      updateEstimate();
-      return;
+    pivot.position.copy(constrained.position);
+    if (!getBlockedPlacementAt(pivot, pivot.position)) {
+      pivot.userData.lastSafePosition = pivot.position.clone();
     }
-    pivot.position.copy(safePosition);
-    pivot.userData.lastSafePosition = safePosition.clone();
 
     if (!state.suppressAutoSelect && options.select !== false) {
       selectFurniture(pivot, document.getElementById("furniture-toolbar"));
@@ -752,33 +1104,6 @@
     return { position, message: messages.join(", ") };
   }
 
-  function findNearestSafePosition(model, preferredPosition) {
-    const offsets = [
-      [0, 0],
-      [0.6, 0],
-      [-0.6, 0],
-      [0, 0.6],
-      [0, -0.6],
-      [1.2, 0],
-      [-1.2, 0],
-      [0, 1.2],
-      [0, -1.2],
-      [1.2, 1.2],
-      [-1.2, 1.2],
-      [1.2, -1.2],
-      [-1.2, -1.2],
-    ];
-
-    for (const [dx, dz] of offsets) {
-      const position = preferredPosition.clone();
-      position.x += dx;
-      position.z += dz;
-      const constrained = applyWallMagnetAndBounds(model, position).position;
-      if (!getBlockedPlacementAt(model, constrained)) return constrained;
-    }
-    return null;
-  }
-
   function getBlockedPlacementAt(model, position) {
     const original = model.position.clone();
     model.position.copy(position);
@@ -791,8 +1116,13 @@
   function getBlockedPlacementReason(model, box) {
     if (isOutsideBounds(box)) return "평면도 경계 밖";
     if (boxIntersectsImageWall(box)) return "이미지 평면도 벽";
+    if (boxIntersectsImageDoorSwing(box)) return "이미지 문 열림 궤적";
+    if (boxOutsideImageFloor(box)) return "타일 바닥 영역 밖";
     for (const wall of state.wallObjects) {
       if (boxesIntersect(getPlanBox(wall), box)) return "벡터 벽체";
+    }
+    for (const zone of state.doorSwingZones) {
+      if (boxIntersectsDoorSwing(box, zone)) return "문 열림 궤적";
     }
     return "";
   }
@@ -801,24 +1131,137 @@
     if (!state.imageWallMask || !state.floorBounds) return false;
     const mask = state.imageWallMask;
     const bounds = state.floorBounds;
-    const minPx = clamp(Math.floor(((box.minX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1);
-    const maxPx = clamp(Math.ceil(((box.maxX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1);
-    const minPy = clamp(Math.floor(((bounds.maxZ - box.maxZ) / bounds.depth) * mask.height), 0, mask.height - 1);
-    const maxPy = clamp(Math.ceil(((bounds.maxZ - box.minZ) / bounds.depth) * mask.height), 0, mask.height - 1);
+    const pixelBox = planBoxToPixelBox(box, mask, bounds);
+    const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
+    const hits = sumMaskArea(mask.integral, mask.width, pixelBox.minX, pixelBox.minY, pixelBox.maxX, pixelBox.maxY);
+    return hits >= 3 && hits / area >= IMAGE_WALL_HIT_RATIO;
+  }
 
-    const stepX = Math.max(1, Math.floor((maxPx - minPx + 1) / 32));
-    const stepY = Math.max(1, Math.floor((maxPy - minPy + 1) / 32));
-    let hits = 0;
-    let samples = 0;
+  function boxIntersectsImageDoorSwing(box) {
+    if (!state.imageDoorSwingMask || !state.floorBounds) return false;
+    const mask = state.imageDoorSwingMask;
+    const bounds = state.floorBounds;
+    const pixelBox = planBoxToPixelBox(box, mask, bounds);
+    const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
+    const hits = sumMaskArea(mask.integral, mask.width, pixelBox.minX, pixelBox.minY, pixelBox.maxX, pixelBox.maxY);
+    return hits >= 2 && hits / area >= IMAGE_DOOR_HIT_RATIO;
+  }
 
-    for (let y = minPy; y <= maxPy; y += stepY) {
-      for (let x = minPx; x <= maxPx; x += stepX) {
-        samples += 1;
-        if (mask.mask[y * mask.width + x]) hits += 1;
-        if (hits >= 2 && hits / samples > 0.002) return true;
+  function boxOutsideImageFloor(box) {
+    if (!state.imageFloorMask || !state.floorBounds) return false;
+    const mask = state.imageFloorMask;
+    const bounds = state.floorBounds;
+    const center = planPointToPixel((box.minX + box.maxX) / 2, (box.minZ + box.maxZ) / 2, mask, bounds);
+    if (!isNearbyFloorPixel(mask, center.x, center.y, 2)) return true;
+
+    const insetX = Math.max((box.maxX - box.minX) * 0.08, 0.02);
+    const insetZ = Math.max((box.maxZ - box.minZ) * 0.08, 0.02);
+    const minX = Math.min(box.minX + insetX, (box.minX + box.maxX) / 2);
+    const maxX = Math.max(box.maxX - insetX, (box.minX + box.maxX) / 2);
+    const minZ = Math.min(box.minZ + insetZ, (box.minZ + box.maxZ) / 2);
+    const maxZ = Math.max(box.maxZ - insetZ, (box.minZ + box.maxZ) / 2);
+
+    let floorSamples = 0;
+    let totalSamples = 0;
+    for (let ix = 0; ix < IMAGE_FLOOR_SAMPLE_GRID; ix += 1) {
+      const x = minX + ((maxX - minX) * ix) / (IMAGE_FLOOR_SAMPLE_GRID - 1);
+      for (let iz = 0; iz < IMAGE_FLOOR_SAMPLE_GRID; iz += 1) {
+        const z = minZ + ((maxZ - minZ) * iz) / (IMAGE_FLOOR_SAMPLE_GRID - 1);
+        const pixel = planPointToPixel(x, z, mask, bounds);
+        totalSamples += 1;
+        if (isFloorPixel(mask, pixel.x, pixel.y)) floorSamples += 1;
       }
     }
-    return hits >= 3;
+
+    return floorSamples / Math.max(totalSamples, 1) < IMAGE_FLOOR_REQUIRED_RATIO;
+  }
+
+  function planBoxToPixelBox(box, mask, bounds) {
+    return {
+      minX: clamp(Math.floor(((box.minX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1),
+      maxX: clamp(Math.ceil(((box.maxX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1),
+      minY: clamp(Math.floor(((bounds.maxZ - box.maxZ) / bounds.depth) * mask.height), 0, mask.height - 1),
+      maxY: clamp(Math.ceil(((bounds.maxZ - box.minZ) / bounds.depth) * mask.height), 0, mask.height - 1),
+    };
+  }
+
+  function planPointToPixel(x, z, mask, bounds) {
+    return {
+      x: clamp(Math.round(((x - bounds.minX) / bounds.width) * (mask.width - 1)), 0, mask.width - 1),
+      y: clamp(Math.round(((bounds.maxZ - z) / bounds.depth) * (mask.height - 1)), 0, mask.height - 1),
+    };
+  }
+
+  function isFloorPixel(mask, x, y) {
+    return Boolean(mask.mask[y * mask.width + x]);
+  }
+
+  function isNearbyFloorPixel(mask, x, y, radius) {
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= mask.width || ny >= mask.height) continue;
+        if (isFloorPixel(mask, nx, ny)) return true;
+      }
+    }
+    return false;
+  }
+
+  function boxIntersectsDoorSwing(box, zone) {
+    const width = Math.max(box.maxX - box.minX, DOOR_SWING_SAMPLE_STEP);
+    const depth = Math.max(box.maxZ - box.minZ, DOOR_SWING_SAMPLE_STEP);
+    const stepsX = Math.max(2, Math.ceil(width / DOOR_SWING_SAMPLE_STEP));
+    const stepsZ = Math.max(2, Math.ceil(depth / DOOR_SWING_SAMPLE_STEP));
+
+    for (let ix = 0; ix <= stepsX; ix += 1) {
+      const x = box.minX + (width * ix) / stepsX;
+      for (let iz = 0; iz <= stepsZ; iz += 1) {
+        const z = box.minZ + (depth * iz) / stepsZ;
+        if (pointInDoorSwing(x, z, zone)) return true;
+      }
+    }
+    return pointInBox(zone.x, zone.z, box);
+  }
+
+  function pointInDoorSwing(x, z, zone) {
+    const dx = x - zone.x;
+    const dz = z - zone.z;
+    const distance = Math.sqrt(dx * dx + dz * dz);
+    if (distance > zone.radius + COLLISION_EPSILON) return false;
+    if (zone.fullCircle) return true;
+    return angleBetween(Math.atan2(dz, dx), zone.startAngle, zone.endAngle);
+  }
+
+  function pointInBox(x, z, box) {
+    return x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ;
+  }
+
+  function angleBetween(angle, start, end) {
+    const normalizedAngle = normalizeAngle(angle);
+    const normalizedStart = normalizeAngle(start);
+    const normalizedEnd = normalizeAngle(end);
+    if (normalizedStart <= normalizedEnd) {
+      return normalizedAngle >= normalizedStart && normalizedAngle <= normalizedEnd;
+    }
+    return normalizedAngle >= normalizedStart || normalizedAngle <= normalizedEnd;
+  }
+
+  function normalizeAngle(angle) {
+    const twoPi = Math.PI * 2;
+    return ((angle % twoPi) + twoPi) % twoPi;
+  }
+
+  function sumMaskArea(integral, width, minX, minY, maxX, maxY) {
+    const stride = width + 1;
+    const x1 = minX;
+    const y1 = minY;
+    const x2 = maxX + 1;
+    const y2 = maxY + 1;
+    return integral[y2 * stride + x2]
+      - integral[y1 * stride + x2]
+      - integral[y2 * stride + x1]
+      + integral[y1 * stride + x1];
   }
 
   function updateSafetyState(extraMessage) {
@@ -860,7 +1303,10 @@
   }
 
   function boxesIntersect(a, b) {
-    return a.minX <= b.maxX && a.maxX >= b.minX && a.minZ <= b.maxZ && a.maxZ >= b.minZ;
+    return a.minX < b.maxX - COLLISION_EPSILON
+      && a.maxX > b.minX + COLLISION_EPSILON
+      && a.minZ < b.maxZ - COLLISION_EPSILON
+      && a.maxZ > b.minZ + COLLISION_EPSILON;
   }
 
   function isOutsideBounds(box) {

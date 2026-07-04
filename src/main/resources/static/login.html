@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Login - Smart 3D Interior Planner</title>
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=3">
 </head>
 <body class="auth-page">
   <header id="top-nav">
@@ -17,7 +17,9 @@
       </div>
     </a>
     <div class="nav-actions">
-      <a class="nav-link" href="/signup.html">Sign Up</a>
+      <a class="nav-link" href="/signup.html" data-auth-guest hidden>Sign Up</a>
+      <span class="nav-user" data-auth-user hidden></span>
+      <button class="secondary-btn" type="button" data-auth-logout hidden>Logout</button>
       <a class="primary-link" href="/">Planner</a>
     </div>
   </header>
@@ -141,6 +143,7 @@
     </section>
   </main>
 
-  <script src="/static/js/auth.js"></script>
+  <script src="/static/js/auth-nav.js?v=3"></script>
+  <script src="/static/js/auth.js?v=3"></script>
 </body>
 </html>

@@ -29,6 +29,7 @@
       <label for="floorPlanInput" class="upload-btn">평면도 업로드</label>
       <input type="file" id="floorPlanInput" accept=".json" hidden>
 
+      <button id="btn-wall-add" class="ghost-btn" type="button">벽 추가</button>
       <button id="btn-save" class="ghost-btn" type="button">저장</button>
       <button id="btn-load" class="ghost-btn" type="button">불러오기</button>
       <button id="btn-pdf" class="ghost-btn" type="button">PDF 견적서</button>
@@ -60,10 +61,28 @@
 
       <section class="panel-section">
         <div class="section-header">
-          <h2>Furniture Catalog</h2>
+          <h2>카탈로그</h2>
           <span id="catalog-count">0 items</span>
         </div>
+        <div id="catalog-tabs" class="catalog-tabs" aria-label="Catalog type"></div>
+        <div id="furniture-category-filter" class="category-filter" aria-label="Furniture category"></div>
         <div id="color-filter" class="segmented-control" aria-label="Color filter"></div>
+      </section>
+
+      <section id="floor-material-section" class="panel-section">
+        <div class="section-header">
+          <h2>바닥 마감재</h2>
+          <span id="floor-material-name">세로형 마루 07</span>
+        </div>
+        <div id="floor-materials" class="material-grid" aria-label="Floor materials"></div>
+      </section>
+
+      <section id="wall-material-section" class="panel-section">
+        <div class="section-header">
+          <h2>벽지</h2>
+          <span id="wall-material-name">화이트 실크</span>
+        </div>
+        <div id="wall-materials" class="material-grid" aria-label="Wall materials"></div>
       </section>
 
       <div id="furniture-list"></div>
@@ -90,7 +109,7 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="/static/js/auth-nav.js?v=3"></script>
-  <script src="/static/js/main.js?v=6"></script>
+  <script src="/static/js/main.js?v=24"></script>
 
 </body>
 </html>

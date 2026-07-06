@@ -1,6 +1,6 @@
 # DuO - Spring Boot Digital Twin Interior Simulator
 
-DuO is now structured as a standard Spring Boot application. It serves the existing Three.js interior planning UI and exposes the furniture catalog API from the same application.
+DuO is structured as a Spring Boot application. It serves the Three.js interior planning UI, exposes furniture catalog APIs, and runs floorplan vectorization/collision services from the backend.
 
 ## Run
 
@@ -28,9 +28,9 @@ Browser (Three.js)
     |
 Spring Boot MVC static resources
     |
-REST API (/api/furniture)
+REST API (/api/furniture, /api/floorplans)
     |
-MySQL when configured, otherwise bundled furniture.csv fallback
+Floorplan services + MySQL when configured, otherwise bundled furniture.csv fallback
 ```
 
 ## Project Structure
@@ -44,10 +44,15 @@ DuO/
 │   ├── main/
 │   │   ├── java/com/duo/app/
 │   │   │   ├── DuoApplication.java
-│   │   │   ├── config/DatabaseConfig.java
-│   │   │   ├── controller/FurnitureController.java
-│   │   │   ├── model/FurnitureItem.java
-│   │   │   └── service/FurnitureService.java
+│   │   │   ├── config/
+│   │   │   ├── controller/
+│   │   │   │   ├── FurnitureController.java
+│   │   │   │   └── FloorplanController.java
+│   │   │   ├── model/
+│   │   │   └── service/
+│   │   │       ├── FurnitureService.java
+│   │   │       ├── FloorplanService.java
+│   │   │       └── CollisionService.java
 │   │   └── resources/
 │   │       ├── application.properties
 │   │       ├── furniture.csv
@@ -60,8 +65,11 @@ DuO/
 │   │               ├── floorplan.json
 │   │               └── models/
 │   └── test/java/com/duo/app/DuoApplicationTests.java
-├── core/
-└── floorplan_collision_detector.py
+├── build_editable_floorplan.py
+├── extract_layers.py
+├── extract_walls.py
+├── floorplan_vectorizer.py
+└── core/
 ```
 
 ## API
@@ -70,6 +78,8 @@ DuO/
 | --- | --- | --- |
 | `GET` | `/` | Main 3D simulator UI |
 | `GET` | `/api/furniture` | Furniture catalog JSON consumed by `main.js` |
+| `POST` | `/api/floorplans/vectorize` | Upload a source floorplan JSON and receive reconstructed editable floors/walls |
+| `POST` | `/api/floorplans/collisions` | Validate vector footprints against walls/furniture on the backend |
 | `GET` | `/actuator/health` | Spring Boot health endpoint |
 
 ## Database Configuration

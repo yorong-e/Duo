@@ -15,9 +15,13 @@
   const MIN_WALL_COMPONENT_PIXELS = 80;
   const MIN_WALL_COMPONENT_LONG_SIDE = 32;
   const IMAGE_WALL_HIT_RATIO = 0.0015;
-  const IMAGE_DOOR_HIT_RATIO = 0.0009;
-  const DOOR_SWING_SAMPLE_STEP = 0.06;
   const COLLISION_EPSILON = 0.012;
+  const ROOM_GAP_TOLERANCE_STEPS = [0.5, 1.0, 1.6, 2.4];
+  const FLOOR_SEAM_MARGIN = 0;
+  const FLOOR_SIMPLIFY_TOLERANCE = 0.025;
+  const FLOOR_TILE_CELL_SIZE = 1;
+  const FLOOR_TILE_MIN_COVERAGE = 0.38;
+  const FLOOR_TILE_CENTER_MIN_COVERAGE = 0.16;
 
   const COLOR_FILTERS = [
     { value: "all", label: "All", swatch: "linear-gradient(135deg, #f8fafc, #004b87)" },
@@ -26,6 +30,38 @@
     { value: "black", label: "Black", swatch: "#111827" },
     { value: "brown", label: "Brown", swatch: "#8b5e3c" },
     { value: "blue", label: "Blue", swatch: "#004b87" },
+  ];
+
+  const CATALOG_SECTIONS = [
+    { value: "furniture", label: "가구" },
+    { value: "floor", label: "바닥" },
+    { value: "wallpaper", label: "벽지" },
+  ];
+
+  const FURNITURE_CATEGORY_FILTERS = [
+    { value: "all", label: "전체", keywords: [] },
+    { value: "sofa", label: "소파", keywords: ["소파", "sofa", "seat"] },
+    { value: "desk", label: "책상", keywords: ["책상", "desk", "table", "테이블"] },
+    { value: "chair", label: "의자", keywords: ["의자", "chair"] },
+    { value: "bed", label: "침대", keywords: ["침대", "bed"] },
+  ];
+
+  const FLOOR_MATERIALS = [
+    { value: "oak", label: "세로형 마루 07", color: 0x8a5a3f, swatch: "linear-gradient(90deg, #6f432f 0 20%, #9c6b4d 20% 40%, #5f3828 40% 60%, #b6815c 60% 80%, #754934 80%)" },
+    { value: "herringbone", label: "헤링본 마루 01", color: 0xb98f66, swatch: "repeating-linear-gradient(45deg, #caa074 0 8px, #a77b55 8px 16px)" },
+    { value: "lightwood", label: "세로형 마루 16", color: 0xd8c7aa, swatch: "linear-gradient(90deg, #eadcc4 0 25%, #cdb895 25% 50%, #f1e4cc 50% 75%, #c7b08d 75%)" },
+    { value: "graytile", label: "세로형 마루 08", color: 0xb9bbb8, swatch: "linear-gradient(90deg, #d4d6d2 0 25%, #aeb1ae 25% 50%, #c5c7c3 50% 75%, #969a98 75%)" },
+    { value: "grass", label: "잔디", color: 0x7f986a, swatch: "radial-gradient(circle, #9db482 0 18%, #718c5d 20% 45%, #8fa873 48%)" },
+    { value: "cream", label: "가로형 마루 33", color: 0xd6c09a, swatch: "linear-gradient(0deg, #e4d2ae 0 25%, #c8ac7c 25% 50%, #eadbbd 50% 75%, #baa071 75%)" },
+  ];
+
+  const WALL_MATERIALS = [
+    { value: "white", label: "화이트 실크", color: 0xf8fafc, swatch: "linear-gradient(135deg, #ffffff, #e5e7eb)" },
+    { value: "warm", label: "웜 그레이지", color: 0xd6cbbd, swatch: "linear-gradient(135deg, #e7dccf, #bfae9d)" },
+    { value: "gray", label: "라이트 그레이", color: 0xc7ccd1, swatch: "linear-gradient(135deg, #e5e7eb, #9ca3af)" },
+    { value: "green", label: "세이지", color: 0xa9b7a2, swatch: "linear-gradient(135deg, #c2d0bb, #7e9277)" },
+    { value: "blue", label: "포그 블루", color: 0xa9bfd0, swatch: "linear-gradient(135deg, #caddea, #7f9bb2)" },
+    { value: "charcoal", label: "차콜 포인트", color: 0x4b5563, swatch: "linear-gradient(135deg, #6b7280, #1f2937)" },
   ];
 
   const TREND_PATTERNS = [
@@ -75,19 +111,31 @@
     floorPlanGroup: null,
     visualizationGroup: null,
     floorBounds: null,
+    floorObjects: [],
+    baseFloorObjects: [],
+    roomObjects: [],
+    selectedRoomId: null,
     imageFloorMask: null,
     imageWallMask: null,
-    imageDoorSwingMask: null,
     wallObjects: [],
-    doorSwingZones: [],
     furnitureMeshes: [],
     selectedFurniture: null,
+    selectedWall: null,
     selectionHelper: null,
     collisionHelpers: [],
     isDragging: false,
+    isWallDragging: false,
+    isWallDrawing: false,
     dragOffset: null,
+    wallDragOffset: null,
+    pendingWallStart: null,
+    wallPreview: null,
     catalogItems: [],
     activeColor: "all",
+    activeCatalogSection: "furniture",
+    activeFurnitureCategory: "all",
+    activeFloorMaterial: "oak",
+    activeWallMaterial: "white",
     activePattern: "A",
     lastWarnings: [],
     blockedDragWarning: "",
@@ -106,8 +154,13 @@
     initInteraction();
     initFloorPlanLoader();
     renderTrendPatterns();
+    renderCatalogTabs();
+    renderFurnitureCategoryFilters();
+    renderFloorMaterials();
+    renderWallMaterials();
     loadCatalog();
     window.addEventListener("resize", onWindowResize);
+    window.addEventListener("keydown", onKeyDown);
     animate();
   };
 
@@ -134,6 +187,11 @@
     const grid = new THREE.GridHelper(20, 20, 0x004b87, 0xaaaaaa);
     grid.position.y = 0.01;
     state.scene.add(grid);
+
+    state.floorPlanGroup = new THREE.Group();
+    state.floorPlanGroup.name = "floorPlan";
+    state.scene.add(state.floorPlanGroup);
+
     setFloorBounds({ minX: -10, maxX: 10, minZ: -10, maxZ: 10 });
   }
 
@@ -147,6 +205,7 @@
     const labelInput = document.getElementById("material-label-input");
 
     state.dragOffset = new THREE.Vector3();
+    state.wallDragOffset = new THREE.Vector3();
     container.addEventListener("pointerdown", (e) => onPointerDown(e, container, toolbar));
     container.addEventListener("pointermove", (e) => onPointerMove(e, container));
     container.addEventListener("dragover", (e) => e.preventDefault());
@@ -156,6 +215,7 @@
     if (toolbar) toolbar.addEventListener("pointerdown", (e) => e.stopPropagation());
     bindClick("btn-rotate", rotateSelectedFurniture);
     bindClick("btn-delete", () => deleteSelectedFurniture(toolbar));
+    bindClick("btn-wall-add", toggleWallDrawingMode);
     bindClick("btn-accept", acceptLayout);
     bindClick("btn-save", saveLayout);
     bindClick("btn-load", loadSavedLayout);
@@ -167,6 +227,12 @@
         state.selectedFurniture.userData.label = labelInput.value.trim() || state.selectedFurniture.userData.productName;
         updateEstimate();
       });
+    }
+  }
+
+  function onKeyDown(e) {
+    if (e.key === "Escape" && state.isWallDrawing) {
+      cancelWallDrawing();
     }
   }
 
@@ -184,23 +250,77 @@
   function onPointerDown(e, container, toolbar) {
     updatePointerNDC(e, container);
     raycaster.setFromCamera(pointerNDC, state.camera);
+    if (state.isWallDrawing) {
+      handleWallDrawingClick();
+      return;
+    }
     const intersects = raycaster.intersectObjects(state.furnitureMeshes, true);
 
-    if (intersects.length === 0) {
-      selectFurniture(null, toolbar);
+    if (intersects.length > 0) {
+      const root = findFurnitureRoot(intersects[0].object);
+      selectFurniture(root, toolbar);
+      if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
+        state.dragOffset.copy(planeIntersectPoint).sub(root.position);
+        state.isDragging = true;
+        state.controls.enabled = false;
+      }
       return;
     }
 
-    const root = findFurnitureRoot(intersects[0].object);
-    selectFurniture(root, toolbar);
-    if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
-      state.dragOffset.copy(planeIntersectPoint).sub(root.position);
-      state.isDragging = true;
-      state.controls.enabled = false;
+    const wallHits = raycaster.intersectObjects(state.wallObjects, false);
+    if (wallHits.length > 0) {
+      const wall = wallHits[0].object;
+      selectWall(wall, toolbar);
+      if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
+        state.wallDragOffset.copy(planeIntersectPoint).sub(wall.position);
+        state.isWallDragging = true;
+        state.controls.enabled = false;
+      }
+      return;
     }
+
+    if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
+      const room = getRoomAtScenePoint(planeIntersectPoint.x, planeIntersectPoint.z);
+      if (room) {
+        selectRoom(room);
+        selectFurniture(null, toolbar);
+        selectWall(null, toolbar);
+        return;
+      }
+    }
+
+    selectFurniture(null, toolbar);
+    selectWall(null, toolbar);
+    selectRoom(null);
   }
 
   function onPointerMove(e, container) {
+    if (state.isWallDrawing && state.pendingWallStart) {
+      updatePointerNDC(e, container);
+      raycaster.setFromCamera(pointerNDC, state.camera);
+      if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
+        updateWallPreview(state.pendingWallStart, planeIntersectPoint);
+      }
+      return;
+    }
+
+    if (state.isWallDragging && state.selectedWall) {
+      updatePointerNDC(e, container);
+      raycaster.setFromCamera(pointerNDC, state.camera);
+      if (!raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) return;
+
+      state.selectedWall.position.set(
+        planeIntersectPoint.x - state.wallDragOffset.x,
+        state.selectedWall.position.y,
+        planeIntersectPoint.z - state.wallDragOffset.z
+      );
+      clearVisualization();
+      if (state.selectionHelper) state.selectionHelper.update();
+      rebuildRoomsFromWalls();
+      updateSafetyState("벽 위치를 조정했습니다.");
+      return;
+    }
+
     if (!state.isDragging || !state.selectedFurniture) return;
     updatePointerNDC(e, container);
     raycaster.setFromCamera(pointerNDC, state.camera);
@@ -228,8 +348,9 @@
   }
 
   function onPointerUp() {
-    if (!state.isDragging) return;
+    if (!state.isDragging && !state.isWallDragging) return;
     state.isDragging = false;
+    state.isWallDragging = false;
     state.controls.enabled = true;
     updateSafetyState();
     updateEstimate();
@@ -255,6 +376,8 @@
   function selectFurniture(model, toolbar) {
     clearSelectionHighlight();
     state.selectedFurniture = model;
+    state.selectedWall = null;
+    if (model) selectRoom(null);
     const labelInput = document.getElementById("material-label-input");
 
     if (model) {
@@ -267,6 +390,38 @@
     }
   }
 
+  function selectWall(wall, toolbar) {
+    clearSelectionHighlight();
+    state.selectedFurniture = null;
+    state.selectedWall = wall;
+    if (wall) selectRoom(null);
+    const labelInput = document.getElementById("material-label-input");
+
+    if (wall) {
+      state.selectionHelper = new THREE.BoxHelper(wall, 0xf59e0b);
+      state.scene.add(state.selectionHelper);
+      if (toolbar) toolbar.style.display = "flex";
+      if (labelInput) labelInput.value = wall.userData.label || wall.userData.id || "벽";
+      updateSceneStatus("벽 편집 모드", "선택한 벽을 드래그하거나 90도 회전, 삭제할 수 있습니다.");
+    } else if (toolbar && !state.selectedFurniture) {
+      toolbar.style.display = "none";
+    }
+  }
+
+  function selectRoom(room) {
+    state.selectedRoomId = room ? room.userData.id : null;
+    state.roomObjects.forEach((entry) => {
+      entry.position.y = entry.userData.id === state.selectedRoomId ? 0.002 : -0.004;
+    });
+    if (room) {
+      updateSceneStatus("방 선택", "선택한 방에 바닥 마감재와 벽지를 따로 적용할 수 있습니다.");
+      state.activeFloorMaterial = room.userData.floorMaterial || state.activeFloorMaterial;
+      state.activeWallMaterial = room.userData.wallMaterial || state.activeWallMaterial;
+      renderFloorMaterials();
+      renderWallMaterials();
+    }
+  }
+
   function clearSelectionHighlight() {
     if (!state.selectionHelper) return;
     state.scene.remove(state.selectionHelper);
@@ -276,6 +431,14 @@
   }
 
   function rotateSelectedFurniture() {
+    if (state.selectedWall) {
+      clearVisualization();
+      state.selectedWall.rotation.y += Math.PI / 2;
+      if (state.selectionHelper) state.selectionHelper.update();
+      rebuildRoomsFromWalls();
+      updateSafetyState("벽을 90도 회전했습니다.");
+      return;
+    }
     if (!state.selectedFurniture) return;
     clearVisualization();
     state.selectedFurniture.rotation.y += Math.PI / 2;
@@ -285,6 +448,20 @@
   }
 
   function deleteSelectedFurniture(toolbar) {
+    if (state.selectedWall) {
+      const wall = state.selectedWall;
+      if (wall.parent) wall.parent.remove(wall);
+      disposeObject3D(wall);
+      state.wallObjects = state.wallObjects.filter((m) => m !== wall);
+      clearSelectionHighlight();
+      clearVisualization();
+      state.selectedWall = null;
+      if (toolbar) toolbar.style.display = "none";
+      rebuildRoomsFromWalls();
+      updateSafetyState("벽을 삭제했습니다.");
+      return;
+    }
+
     const model = state.selectedFurniture;
     if (!model) return;
     state.scene.remove(model);
@@ -296,6 +473,99 @@
     if (toolbar) toolbar.style.display = "none";
     updateSafetyState();
     updateEstimate();
+  }
+
+  function toggleWallDrawingMode() {
+    if (state.isWallDrawing) {
+      cancelWallDrawing();
+      return;
+    }
+    clearVisualization();
+    clearSelectionHighlight();
+    state.selectedFurniture = null;
+    state.selectedWall = null;
+    state.isWallDrawing = true;
+    state.pendingWallStart = null;
+    const button = document.getElementById("btn-wall-add");
+    if (button) button.classList.add("active");
+    updateSceneStatus("벽 추가 모드", "시작점과 끝점을 차례로 클릭해서 벽을 생성합니다. ESC로 취소합니다.");
+  }
+
+  function cancelWallDrawing() {
+    state.isWallDrawing = false;
+    state.pendingWallStart = null;
+    removeWallPreview();
+    const button = document.getElementById("btn-wall-add");
+    if (button) button.classList.remove("active");
+    updateSceneStatus("Planning Mode", "가구와 벽을 배치하고 충돌을 확인합니다.");
+  }
+
+  function handleWallDrawingClick() {
+    if (!raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) return;
+    const point = planeIntersectPoint.clone();
+    if (!state.pendingWallStart) {
+      state.pendingWallStart = point;
+      updateSceneStatus("벽 추가 모드", "끝점을 클릭해서 벽을 완성합니다. ESC로 취소합니다.");
+      return;
+    }
+
+    const start = state.pendingWallStart.clone();
+    const end = snapWallEnd(start, point);
+    if (start.distanceTo(end) >= 0.12) {
+      addSceneWall(start, end);
+      rebuildRoomsFromWalls();
+      updateSafetyState("벽을 추가했습니다.");
+    }
+    cancelWallDrawing();
+  }
+
+  function snapWallEnd(start, end) {
+    const snapped = end.clone();
+    const dx = Math.abs(end.x - start.x);
+    const dz = Math.abs(end.z - start.z);
+    if (dx > dz * 1.35) snapped.z = start.z;
+    if (dz > dx * 1.35) snapped.x = start.x;
+    return snapped;
+  }
+
+  function addSceneWall(start, end) {
+    const group = state.floorPlanGroup || state.scene;
+    const thickness = currentWallThickness();
+    const height = 2.4;
+    const wall = createPlanningWallMesh(start, end, thickness, height, {
+      id: `wall_custom_${Date.now()}`,
+      label: "사용자 벽",
+      editable: true,
+      source: null,
+    });
+    group.add(wall);
+    state.wallObjects.push(wall);
+  }
+
+  function currentWallThickness() {
+    const existing = state.wallObjects.find((wall) => wall.geometry && wall.geometry.parameters);
+    return existing ? Math.max(existing.geometry.parameters.depth, 0.08) : 0.14;
+  }
+
+  function updateWallPreview(start, end) {
+    const snapped = snapWallEnd(start, end);
+    removeWallPreview();
+    if (start.distanceTo(snapped) < 0.12) return;
+    state.wallPreview = createPlanningWallMesh(start, snapped, currentWallThickness(), 2.4, {
+      id: "wall_preview",
+      label: "벽 미리보기",
+      editable: false,
+      source: null,
+    });
+    state.wallPreview.material.opacity = 0.42;
+    state.scene.add(state.wallPreview);
+  }
+
+  function removeWallPreview() {
+    if (!state.wallPreview) return;
+    state.scene.remove(state.wallPreview);
+    disposeObject3D(state.wallPreview);
+    state.wallPreview = null;
   }
 
   function initFloorPlanLoader() {
@@ -313,20 +583,55 @@
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        loadFloorPlan(JSON.parse(event.target.result));
-      } catch (err) {
+    vectorizeFloorPlanFile(file)
+      .then((planData) => loadFloorPlan(planData))
+      .catch((err) => {
         console.error(err);
         alert("평면도 데이터를 불러오지 못했습니다: " + err.message);
+      });
+  }
+
+  async function vectorizeFloorPlanFile(file) {
+    updateSceneStatus("평면도 분석 중", "서버에서 벽과 바닥을 분리하고 재구성 JSON을 만들고 있습니다.");
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch("/api/floorplans/vectorize", {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const message = await readErrorMessage(res);
+      if (res.status === 413) {
+        throw new Error(`업로드 파일(${formatBytes(file.size)})이 서버 허용 크기보다 큽니다. 서버 재시작 후 다시 시도하세요.`);
       }
-    };
-    reader.onerror = () => alert("평면도 파일을 읽는 중 오류가 발생했습니다.");
-    reader.readAsText(file);
+      throw new Error(message || `서버 벡터화 요청 실패 (${res.status})`);
+    }
+    return res.json();
+  }
+
+  async function readErrorMessage(res) {
+    const text = await res.text();
+    if (!text) return "";
+    try {
+      const data = JSON.parse(text);
+      return data.message || data.error || text;
+    } catch (_err) {
+      return text;
+    }
+  }
+
+  function formatBytes(bytes) {
+    const value = Number(bytes) || 0;
+    if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)}MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)}KB`;
+    return `${value}B`;
   }
 
   function loadFloorPlan(planData) {
+    if (isEditableFloorPlan(planData)) {
+      loadReconstructedFloorPlan(planData);
+      return;
+    }
     const imageDataUri = findImageDataUri(planData);
     if (imageDataUri) {
       loadImageFloorPlan(planData, imageDataUri);
@@ -337,6 +642,12 @@
       return;
     }
     throw new Error("지원하지 않는 평면도 형식입니다.");
+  }
+
+  function isEditableFloorPlan(planData) {
+    if (!planData || typeof planData !== "object") return false;
+    if (planData.layers && planData.layers.mode === "editable_floorplan") return true;
+    return Array.isArray(planData.walls) && Array.isArray(planData.floors);
   }
 
   function findImageDataUri(node, depth) {
@@ -368,10 +679,11 @@
       const group = new THREE.Group();
       group.name = "floorPlan";
       group.add(mesh);
-      addDoorsToGroup(group, planData, {
+      const imageTransform = {
         scale,
         toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: planeH / 2 - point.y * scale }),
-      });
+      };
+      addWallsToGroup(group, planData, imageTransform);
       state.scene.add(group);
       state.floorPlanGroup = group;
       setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
@@ -428,33 +740,23 @@
         mask,
         integral: buildMaskIntegral(mask, width, height),
       };
-      const darkMasks = classifyDarkImageMasks(wallCandidateMask, width, height);
-      const wallMask = darkMasks.wallMask;
-      const doorMask = darkMasks.doorMask;
+      const wallMask = cleanImageWallMask(wallCandidateMask, width, height);
       const wallPixels = countMaskPixels(wallMask);
-      const doorPixels = countMaskPixels(doorMask);
       state.imageWallMask = {
         width,
         height,
         mask: wallMask,
         integral: buildMaskIntegral(wallMask, width, height),
       };
-      state.imageDoorSwingMask = {
-        width,
-        height,
-        mask: doorMask,
-        integral: buildMaskIntegral(doorMask, width, height),
-      };
       updateSceneStatus(
         "바닥색 분석 완료",
-        `베이지 바닥 ${floorPixels.toLocaleString("ko-KR")}개, 벽선 ${wallPixels.toLocaleString("ko-KR")}개, 문 궤적 ${doorPixels.toLocaleString("ko-KR")}개를 인식했습니다.`
+        `베이지 바닥 ${floorPixels.toLocaleString("ko-KR")}개, 벽선 ${wallPixels.toLocaleString("ko-KR")}개를 인식했습니다.`
       );
       updateSafetyState();
     };
     img.onerror = () => {
       state.imageFloorMask = null;
       state.imageWallMask = null;
-      state.imageDoorSwingMask = null;
       updateSceneStatus("바닥색 분석 실패", "평면도 이미지는 표시되지만 타일색 배치 제한은 적용되지 않았습니다.");
     };
     img.src = imageDataUri;
@@ -566,11 +868,10 @@
     return cleaned;
   }
 
-  function classifyDarkImageMasks(rawMask, width, height) {
+  function cleanImageWallMask(rawMask, width, height) {
     const total = width * height;
     const visited = new Uint8Array(total);
     const wallMask = new Uint8Array(total);
-    const doorMask = new Uint8Array(total);
     const queue = [];
     const minArea = Math.max(MIN_WALL_COMPONENT_PIXELS, Math.floor(total * 0.00002));
     const minLongSide = Math.max(MIN_WALL_COMPONENT_LONG_SIDE, Math.floor(Math.min(width, height) * 0.01));
@@ -614,17 +915,10 @@
       const lineLike = longSide >= minLongSide && aspect >= 2.8;
       const outlineLike = count >= minArea * 4 && longSide >= minLongSide * 2;
       const tooSmallForWall = count < minArea || longSide < minLongSide;
-      const arcLike = count >= Math.max(58, Math.floor(minArea * 0.7))
-        && longSide >= minLongSide
-        && aspect < 2.8
-        && density >= 0.012
-        && density <= 0.34;
-      const wallLike = !tooSmallForWall && density >= 0.006 && (lineLike || outlineLike) && !arcLike;
+      const wallLike = !tooSmallForWall && density >= 0.006 && (lineLike || outlineLike);
 
       if (wallLike) {
         for (const index of queue) wallMask[index] = 1;
-      } else if (arcLike) {
-        for (const index of queue) doorMask[index] = 1;
       }
 
       function visitMaskNeighbor(index, inBounds) {
@@ -634,7 +928,7 @@
       }
     }
 
-    return { wallMask, doorMask };
+    return wallMask;
   }
 
   function countMaskPixels(mask) {
@@ -667,144 +961,764 @@
     };
   }
 
+  function loadReconstructedFloorPlan(planData) {
+    clearFloorPlan();
+    const attrs = getFloorPlanPixelSize(planData);
+    const scale = FLOOR_PLAN_TARGET_SIZE / Math.max(attrs.width, attrs.height);
+    const planeW = attrs.width * scale;
+    const planeH = attrs.height * scale;
+    const group = new THREE.Group();
+    group.name = "floorPlan";
+    state.wallObjects = [];
+    state.floorObjects = [];
+    state.baseFloorObjects = [];
+    state.roomObjects = [];
+    state.selectedRoomId = null;
+
+    const imageTransform = {
+      scale,
+      toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: planeH / 2 - point.y * scale }),
+    };
+
+    addWallsToGroup(group, planData, imageTransform);
+    state.scene.add(group);
+    state.floorPlanGroup = group;
+    setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
+    state.imageWallMask = null;
+    const usedExtractedFootprint = loadExtractedFloorFootprintFromPlan(planData, attrs);
+    if (!usedExtractedFootprint) {
+      const usedExtractedRooms = loadExtractedRoomsFromPlan(planData, attrs);
+      if (!usedExtractedRooms) rebuildRoomsFromWalls();
+    }
+    focusCameraOnArea(planeW, planeH, new THREE.Vector3(0, 0, 0));
+    updateSceneStatus(
+      "재구성 평면도 로드 완료",
+      usedExtractedFootprint ? "평면도 이미지 영역 전체를 바닥으로 인식합니다." : "벽으로 닫힌 내부 공간을 방 단위 바닥으로 인식합니다."
+    );
+    updateSafetyState();
+  }
+
+  function addReconstructedFloorsToGroup(group, planData, transform) {
+    const floors = Array.isArray(planData.floors) ? planData.floors : [];
+    if (floors.length === 0) {
+      addFallbackFloorPlane(group, transform);
+      return;
+    }
+
+    floors.forEach((floor) => {
+      const points = Array.isArray(floor.points) ? floor.points : [];
+      if (points.length < 3) return;
+      const scenePoints = points.map((point) => {
+        const scenePoint = transform.toScenePoint(point);
+        return { x: scenePoint.x, y: -scenePoint.z };
+      });
+      const smoothedPoints = simplifyPolygon(scenePoints, FLOOR_SIMPLIFY_TOLERANCE);
+      const sealedPoints = inflatePolygon(smoothedPoints, FLOOR_SEAM_MARGIN);
+      const shape = new THREE.Shape();
+      sealedPoints.forEach((point, index) => {
+        if (index === 0) shape.moveTo(point.x, point.y);
+        else shape.lineTo(point.x, point.y);
+      });
+      shape.closePath();
+      const mesh = new THREE.Mesh(
+        new THREE.ShapeGeometry(shape),
+        createFloorMaterial()
+      );
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.y = -0.002;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+      state.baseFloorObjects.push(mesh);
+    });
+  }
+
+  function simplifyPolygon(points, tolerance) {
+    if (tolerance <= 0 || points.length < 4) return points;
+    const keep = new Uint8Array(points.length);
+    keep[0] = 1;
+    keep[points.length - 1] = 1;
+    rdpMarkKeep(points, 0, points.length - 1, tolerance, keep);
+    return points.filter((_, index) => keep[index]);
+  }
+
+  function rdpMarkKeep(points, startIndex, endIndex, tolerance, keep) {
+    if (endIndex <= startIndex + 1) return;
+    const start = points[startIndex];
+    const end = points[endIndex];
+    let maxDist = 0;
+    let maxIndex = -1;
+    for (let i = startIndex + 1; i < endIndex; i += 1) {
+      const dist = pointToSegmentDistance(points[i], start, end);
+      if (dist > maxDist) {
+        maxDist = dist;
+        maxIndex = i;
+      }
+    }
+    if (maxDist > tolerance && maxIndex !== -1) {
+      keep[maxIndex] = 1;
+      rdpMarkKeep(points, startIndex, maxIndex, tolerance, keep);
+      rdpMarkKeep(points, maxIndex, endIndex, tolerance, keep);
+    }
+  }
+
+  function pointToSegmentDistance(point, start, end) {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq === 0) return Math.hypot(point.x - start.x, point.y - start.y);
+    const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq));
+    const projX = start.x + t * dx;
+    const projY = start.y + t * dy;
+    return Math.hypot(point.x - projX, point.y - projY);
+  }
+
+  function inflatePolygon(points, margin) {
+    if (margin <= 0 || points.length < 3) return points;
+    const centroid = points.reduce(
+      (acc, p) => ({ x: acc.x + p.x / points.length, y: acc.y + p.y / points.length }),
+      { x: 0, y: 0 }
+    );
+    return points.map((p) => {
+      const dx = p.x - centroid.x;
+      const dy = p.y - centroid.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      return { x: p.x + (dx / dist) * margin, y: p.y + (dy / dist) * margin };
+    });
+  }
+
+  function addFallbackFloorPlane(group, transform) {
+    const width = FLOOR_PLAN_TARGET_SIZE;
+    const height = FLOOR_PLAN_TARGET_SIZE;
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(width, height),
+      createFloorMaterial()
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.002;
+    floor.receiveShadow = true;
+    group.add(floor);
+    state.baseFloorObjects.push(floor);
+  }
+
+  function buildFloorMaskFromPolygons(planData, width, height, planeW, planeH) {
+    const floors = Array.isArray(planData.floors) ? planData.floors : [];
+    if (floors.length === 0) return null;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.fillStyle = "#000";
+    floors.forEach((floor) => {
+      const points = Array.isArray(floor.points) ? floor.points : [];
+      if (points.length < 3) return;
+      ctx.beginPath();
+      points.forEach((point, index) => {
+        if (index === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      });
+      ctx.closePath();
+      ctx.fill();
+    });
+
+    const data = ctx.getImageData(0, 0, width, height).data;
+    const mask = new Uint8Array(width * height);
+    for (let i = 3, p = 0; i < data.length; i += 4, p += 1) {
+      if (data[i] > 0) mask[p] = 1;
+    }
+    return {
+      width,
+      height,
+      planeW,
+      planeH,
+      mask,
+      integral: buildMaskIntegral(mask, width, height),
+    };
+  }
+
+  function buildFullFloorMask(width, height, planeW, planeH) {
+    const mask = new Uint8Array(width * height);
+    mask.fill(1);
+    return {
+      width,
+      height,
+      planeW,
+      planeH,
+      mask,
+      integral: buildMaskIntegral(mask, width, height),
+    };
+  }
+
+  function loadExtractedFloorFootprintFromPlan(planData, attrs) {
+    const floors = Array.isArray(planData.floors) ? planData.floors : [];
+    if (floors.length === 0 || !state.floorBounds) return false;
+
+    clearRoomFloors();
+    const width = 320;
+    const height = Math.max(96, Math.round(width * attrs.height / Math.max(attrs.width, 1)));
+    const combined = new Uint8Array(width * height);
+
+    floors.forEach((floor) => {
+      const mask = rasterizePlanPolygonToMask(floor.points, attrs, width, height);
+      mask.forEach((value, index) => {
+        if (value) combined[index] = 1;
+      });
+    });
+
+    const metrics = measureMask(combined, width, height);
+    if (metrics.count <= Math.max(40, width * height * 0.0008)) return false;
+
+    const roomData = {
+      width,
+      height,
+      bounds: state.floorBounds,
+      rooms: [{
+        id: "floor_footprint",
+        mask: combined,
+        count: metrics.count,
+        bbox: metrics.bbox,
+        floorMaterial: state.activeFloorMaterial,
+        wallMaterial: state.activeWallMaterial,
+      }],
+    };
+
+    state.roomObjects = roomData.rooms.map((room) => createRoomFloor(room, roomData));
+    state.roomObjects.forEach((room) => {
+      state.floorPlanGroup.add(room);
+      state.floorObjects.push(room);
+    });
+    state.imageFloorMask = buildMaskFromRooms(roomData);
+    state.selectedRoomId = null;
+    return true;
+  }
+
+  function loadExtractedRoomsFromPlan(planData, attrs) {
+    const rooms = Array.isArray(planData.rooms) ? planData.rooms : [];
+    if (rooms.length === 0 || !state.floorBounds) return false;
+
+    clearRoomFloors();
+    const width = 320;
+    const height = Math.max(96, Math.round(width * attrs.height / Math.max(attrs.width, 1)));
+    const roomData = { width, height, bounds: state.floorBounds, rooms: [] };
+
+    rooms.forEach((room, index) => {
+      const mask = rasterizePlanPolygonToMask(room.points, attrs, width, height);
+      const metrics = measureMask(mask, width, height);
+      if (metrics.count <= Math.max(40, width * height * 0.0008)) return;
+      roomData.rooms.push({
+        id: room.id || `room_${index + 1}`,
+        mask,
+        count: metrics.count,
+        bbox: metrics.bbox,
+        floorMaterial: state.activeFloorMaterial,
+        wallMaterial: state.activeWallMaterial,
+      });
+    });
+
+    if (roomData.rooms.length === 0) return false;
+
+    state.roomObjects = roomData.rooms.map((room) => createRoomFloor(room, roomData));
+    state.roomObjects.forEach((room) => {
+      state.floorPlanGroup.add(room);
+      state.floorObjects.push(room);
+    });
+    state.imageFloorMask = buildMaskFromRooms(roomData);
+    state.selectedRoomId = null;
+    return true;
+  }
+
+  function rasterizePlanPolygonToMask(points, attrs, width, height) {
+    const mask = new Uint8Array(width * height);
+    if (!Array.isArray(points) || points.length < 3) return mask;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const x = (Number(point.x) / Math.max(attrs.width - 1, 1)) * (width - 1);
+      const y = (Number(point.y) / Math.max(attrs.height - 1, 1)) * (height - 1);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.fill();
+
+    const data = ctx.getImageData(0, 0, width, height).data;
+    for (let i = 3, p = 0; i < data.length; i += 4, p += 1) {
+      if (data[i] > 0) mask[p] = 1;
+    }
+    return mask;
+  }
+
+  function measureMask(mask, width, height) {
+    let count = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+    for (let index = 0; index < mask.length; index += 1) {
+      if (!mask[index]) continue;
+      const x = index % width;
+      const y = Math.floor(index / width);
+      count += 1;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    if (count === 0) {
+      return { count: 0, bbox: { minX: 0, minY: 0, maxX: 0, maxY: 0 } };
+    }
+    return { count, bbox: { minX, minY, maxX, maxY } };
+  }
+
+  function rebuildRoomsFromWalls() {
+    if (!state.floorPlanGroup || !state.floorBounds) return;
+    const previousRooms = state.roomObjects.map((room) => ({
+      center: room.userData.center,
+      floorMaterial: room.userData.floorMaterial,
+      wallMaterial: room.userData.wallMaterial,
+    }));
+    clearRoomFloors();
+    const roomData = detectRoomsFromWalls(260);
+    if (roomData.rooms.length === 0 && state.wallObjects.length > 0) {
+      roomData.rooms.push(createFallbackRoom(roomData));
+    }
+    roomData.rooms.forEach((room) => {
+      const previous = previousRooms.find((entry) => entry.center && pointInRoomMask(entry.center.x, entry.center.z, room, roomData));
+      if (previous) {
+        room.floorMaterial = previous.floorMaterial;
+        room.wallMaterial = previous.wallMaterial;
+      }
+    });
+    state.roomObjects = roomData.rooms.map((room) => createRoomFloor(room, roomData));
+    state.roomObjects.forEach((room) => {
+      state.floorPlanGroup.add(room);
+      state.floorObjects.push(room);
+    });
+    state.imageFloorMask = buildMaskFromRooms(roomData);
+    if (state.selectedRoomId && !state.roomObjects.some((room) => room.userData.id === state.selectedRoomId)) {
+      state.selectedRoomId = null;
+    }
+  }
+
+  function clearRoomFloors() {
+    state.floorObjects.forEach((floor) => {
+      if (floor.parent) floor.parent.remove(floor);
+      disposeObject3D(floor);
+    });
+    state.floorObjects = [];
+    state.roomObjects = [];
+  }
+
+  function detectRoomsFromWalls(size) {
+    const bounds = state.floorBounds;
+    const width = size;
+    const height = Math.max(80, Math.round(size * bounds.depth / Math.max(bounds.width, 0.001)));
+    const blocked = new Uint8Array(width * height);
+
+    state.wallObjects.forEach((wall) => rasterizeFootprint(blocked, width, height, getPlanFootprint(wall), bounds));
+
+    const pixelsPerUnit = width / Math.max(bounds.width, 0.001);
+    let bestRooms = [];
+    let bestArea = 0;
+    for (const tolerance of ROOM_GAP_TOLERANCE_STEPS) {
+      const gapRadius = Math.max(1, Math.round((tolerance / 2) * pixelsPerUnit));
+      const sealedBlocked = closeMaskGaps(blocked, width, height, gapRadius);
+      const rooms = findEnclosedRooms(sealedBlocked, width, height);
+      const area = rooms.reduce((sum, room) => sum + room.count, 0);
+      if (area > bestArea) {
+        bestRooms = rooms;
+        bestArea = area;
+      }
+    }
+
+    return { width, height, bounds, rooms: bestRooms };
+  }
+
+  function findEnclosedRooms(sealedBlocked, width, height) {
+    const rooms = [];
+    const visited = new Uint8Array(width * height);
+    const queue = [];
+    for (let start = 0; start < sealedBlocked.length; start += 1) {
+      if (sealedBlocked[start] || visited[start]) continue;
+      let head = 0;
+      let touchesBorder = false;
+      let minX = width;
+      let minY = height;
+      let maxX = 0;
+      let maxY = 0;
+      queue.length = 0;
+      queue.push(start);
+      visited[start] = 1;
+
+      while (head < queue.length) {
+        const index = queue[head++];
+        const x = index % width;
+        const y = Math.floor(index / width);
+        if (x === 0 || y === 0 || x === width - 1 || y === height - 1) touchesBorder = true;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+        visitRoomNeighbor(index - 1, x > 0);
+        visitRoomNeighbor(index + 1, x < width - 1);
+        visitRoomNeighbor(index - width, y > 0);
+        visitRoomNeighbor(index + width, y < height - 1);
+      }
+
+      if (!touchesBorder && queue.length > Math.max(80, width * height * 0.002)) {
+        const roomMask = new Uint8Array(width * height);
+        queue.forEach((index) => { roomMask[index] = 1; });
+        rooms.push({
+          id: `room_${rooms.length + 1}`,
+          mask: roomMask,
+          count: queue.length,
+          bbox: { minX, minY, maxX, maxY },
+          floorMaterial: state.activeFloorMaterial,
+          wallMaterial: state.activeWallMaterial,
+        });
+      }
+
+      function visitRoomNeighbor(index, inBounds) {
+        if (!inBounds || visited[index] || sealedBlocked[index]) return;
+        visited[index] = 1;
+        queue.push(index);
+      }
+    }
+    return rooms;
+  }
+
+  function createFallbackRoom(roomData) {
+    const mask = new Uint8Array(roomData.width * roomData.height).fill(1);
+    return {
+      id: "room_fallback",
+      mask,
+      count: mask.length,
+      bbox: { minX: 0, minY: 0, maxX: roomData.width - 1, maxY: roomData.height - 1 },
+      floorMaterial: state.activeFloorMaterial,
+      wallMaterial: state.activeWallMaterial,
+    };
+  }
+
+  function dilateMask(mask, width, height, radius) {
+    if (radius <= 0) return mask;
+    const rowPass = new Uint8Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      const rowStart = y * width;
+      for (let x = 0; x < width; x += 1) {
+        const xStart = Math.max(0, x - radius);
+        const xEnd = Math.min(width - 1, x + radius);
+        let hit = 0;
+        for (let xx = xStart; xx <= xEnd; xx += 1) {
+          if (mask[rowStart + xx]) { hit = 1; break; }
+        }
+        rowPass[rowStart + x] = hit;
+      }
+    }
+    const result = new Uint8Array(width * height);
+    for (let x = 0; x < width; x += 1) {
+      for (let y = 0; y < height; y += 1) {
+        const yStart = Math.max(0, y - radius);
+        const yEnd = Math.min(height - 1, y + radius);
+        let hit = 0;
+        for (let yy = yStart; yy <= yEnd; yy += 1) {
+          if (rowPass[yy * width + x]) { hit = 1; break; }
+        }
+        result[y * width + x] = hit;
+      }
+    }
+    return result;
+  }
+
+  function closeMaskGaps(mask, width, height, radius) {
+    if (radius <= 0) return mask;
+    const dilated = dilateMask(mask, width, height, radius);
+    const invertedDilated = new Uint8Array(width * height);
+    for (let i = 0; i < dilated.length; i += 1) invertedDilated[i] = dilated[i] ? 0 : 1;
+    const erodedInverted = dilateMask(invertedDilated, width, height, radius);
+    const result = new Uint8Array(width * height);
+    for (let i = 0; i < erodedInverted.length; i += 1) result[i] = erodedInverted[i] ? 0 : 1;
+    return result;
+  }
+
+  function rasterizeFootprint(mask, width, height, points, bounds) {
+    if (!points || points.length < 3) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    points.forEach((point, index) => {
+      const pixel = scenePointToRoomPixel(point.x, point.z, width, height, bounds);
+      if (index === 0) ctx.moveTo(pixel.x, pixel.y);
+      else ctx.lineTo(pixel.x, pixel.y);
+    });
+    ctx.closePath();
+    ctx.fill();
+    const data = ctx.getImageData(0, 0, width, height).data;
+    for (let i = 3, p = 0; i < data.length; i += 4, p += 1) {
+      if (data[i] > 0) mask[p] = 1;
+    }
+  }
+
+  function createRoomFloor(room, roomData) {
+    const material = createMaskedRoomMaterial(room, roomData);
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(roomData.bounds.width, roomData.bounds.depth),
+      material
+    );
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(roomData.bounds.center.x, -0.004, roomData.bounds.center.z);
+    mesh.receiveShadow = true;
+    mesh.userData = {
+      type: "room",
+      id: room.id,
+      mask: room.mask,
+      maskWidth: roomData.width,
+      maskHeight: roomData.height,
+      bbox: room.bbox,
+      center: roomCenterToScene(room, roomData),
+      floorMaterial: room.floorMaterial,
+      wallMaterial: room.wallMaterial,
+    };
+    return mesh;
+  }
+
+  function roomCenterToScene(room, roomData) {
+    const px = (room.bbox.minX + room.bbox.maxX) / 2;
+    const py = (room.bbox.minY + room.bbox.maxY) / 2;
+    return {
+      x: roomData.bounds.minX + (px / Math.max(roomData.width - 1, 1)) * roomData.bounds.width,
+      z: roomData.bounds.maxZ - (py / Math.max(roomData.height - 1, 1)) * roomData.bounds.depth,
+    };
+  }
+
+  function pointInRoomMask(x, z, room, roomData) {
+    const pixel = scenePointToRoomPixel(x, z, roomData.width, roomData.height, roomData.bounds);
+    return Boolean(room.mask[pixel.y * roomData.width + pixel.x]);
+  }
+
+  function createMaskedRoomMaterial(room, roomData) {
+    const canvas = document.createElement("canvas");
+    canvas.width = roomData.width;
+    canvas.height = roomData.height;
+    const ctx = canvas.getContext("2d");
+    const tiledMask = createGridAlignedFloorMask(room.mask, roomData);
+    drawGridAlignedFloorPattern(ctx, tiledMask, roomData, getFloorMaterialByValue(room.floorMaterial));
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.needsUpdate = true;
+    return new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: texture,
+      transparent: true,
+      roughness: 0.82,
+      side: THREE.DoubleSide,
+    });
+  }
+
+  function drawGridAlignedFloorPattern(ctx, tiledMask, roomData, material) {
+    const width = roomData.width;
+    const height = roomData.height;
+    const bounds = roomData.bounds;
+    const cellSize = Math.max(FLOOR_TILE_CELL_SIZE, 0.1);
+    const startX = Math.floor(bounds.minX / cellSize) * cellSize;
+    const endX = Math.ceil(bounds.maxX / cellSize) * cellSize;
+    const startZ = Math.floor(bounds.minZ / cellSize) * cellSize;
+    const endZ = Math.ceil(bounds.maxZ / cellSize) * cellSize;
+    const patternCanvas = createFloorPatternCanvas(material, 96, 96);
+
+    ctx.clearRect(0, 0, width, height);
+    for (let cellX = startX; cellX < endX; cellX += cellSize) {
+      for (let cellZ = startZ; cellZ < endZ; cellZ += cellSize) {
+        const pixelBox = sceneCellToMaskPixelBox(cellX, cellZ, cellSize, width, height, bounds);
+        if (!maskBoxHasPixel(tiledMask, width, pixelBox)) continue;
+
+        const x = pixelBox.minX;
+        const y = pixelBox.minY;
+        const w = Math.max(pixelBox.maxX - pixelBox.minX + 1, 1);
+        const h = Math.max(pixelBox.maxY - pixelBox.minY + 1, 1);
+        ctx.drawImage(patternCanvas, x, y, w, h);
+        ctx.strokeStyle = "rgba(255,255,255,0.26)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, Math.max(w - 1, 1), Math.max(h - 1, 1));
+      }
+    }
+  }
+
+  function maskBoxHasPixel(mask, width, pixelBox) {
+    for (let y = pixelBox.minY; y <= pixelBox.maxY; y += 1) {
+      const row = y * width;
+      for (let x = pixelBox.minX; x <= pixelBox.maxX; x += 1) {
+        if (mask[row + x]) return true;
+      }
+    }
+    return false;
+  }
+
+  function createGridAlignedFloorMask(sourceMask, roomData) {
+    const width = roomData.width;
+    const height = roomData.height;
+    const result = new Uint8Array(width * height);
+    const bounds = roomData.bounds;
+    const cellSize = Math.max(FLOOR_TILE_CELL_SIZE, 0.1);
+    const startX = Math.floor(bounds.minX / cellSize) * cellSize;
+    const endX = Math.ceil(bounds.maxX / cellSize) * cellSize;
+    const startZ = Math.floor(bounds.minZ / cellSize) * cellSize;
+    const endZ = Math.ceil(bounds.maxZ / cellSize) * cellSize;
+
+    for (let cellX = startX; cellX < endX; cellX += cellSize) {
+      for (let cellZ = startZ; cellZ < endZ; cellZ += cellSize) {
+        const pixelBox = sceneCellToMaskPixelBox(cellX, cellZ, cellSize, width, height, bounds);
+        const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
+        let hits = 0;
+        for (let y = pixelBox.minY; y <= pixelBox.maxY; y += 1) {
+          const row = y * width;
+          for (let x = pixelBox.minX; x <= pixelBox.maxX; x += 1) {
+            if (sourceMask[row + x]) hits += 1;
+          }
+        }
+        if (!shouldFillFloorTileCell(sourceMask, width, pixelBox, hits / area)) continue;
+        for (let y = pixelBox.minY; y <= pixelBox.maxY; y += 1) {
+          const row = y * width;
+          for (let x = pixelBox.minX; x <= pixelBox.maxX; x += 1) {
+            result[row + x] = 1;
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  function shouldFillFloorTileCell(sourceMask, width, pixelBox, coverage) {
+    if (coverage >= FLOOR_TILE_MIN_COVERAGE) return true;
+    if (coverage < FLOOR_TILE_CENTER_MIN_COVERAGE) return false;
+    const centerX = Math.round((pixelBox.minX + pixelBox.maxX) / 2);
+    const centerY = Math.round((pixelBox.minY + pixelBox.maxY) / 2);
+    return Boolean(sourceMask[centerY * width + centerX]);
+  }
+
+  function sceneCellToMaskPixelBox(cellX, cellZ, cellSize, width, height, bounds) {
+    const minPixel = scenePointToRoomPixel(cellX, cellZ + cellSize, width, height, bounds);
+    const maxPixel = scenePointToRoomPixel(cellX + cellSize, cellZ, width, height, bounds);
+    return {
+      minX: clamp(Math.min(minPixel.x, maxPixel.x), 0, width - 1),
+      maxX: clamp(Math.max(minPixel.x, maxPixel.x), 0, width - 1),
+      minY: clamp(Math.min(minPixel.y, maxPixel.y), 0, height - 1),
+      maxY: clamp(Math.max(minPixel.y, maxPixel.y), 0, height - 1),
+    };
+  }
+
+  function buildMaskFromRooms(roomData) {
+    const mask = new Uint8Array(roomData.width * roomData.height);
+    roomData.rooms.forEach((room) => {
+      const roomMask = createGridAlignedFloorMask(room.mask, roomData);
+      roomMask.forEach((value, index) => {
+        if (value) mask[index] = 1;
+      });
+    });
+    return {
+      width: roomData.width,
+      height: roomData.height,
+      planeW: roomData.bounds.width,
+      planeH: roomData.bounds.depth,
+      mask,
+      integral: buildMaskIntegral(mask, roomData.width, roomData.height),
+    };
+  }
+
+  function scenePointToRoomPixel(x, z, width, height, bounds) {
+    return {
+      x: clamp(Math.round(((x - bounds.minX) / bounds.width) * (width - 1)), 0, width - 1),
+      y: clamp(Math.round(((bounds.maxZ - z) / bounds.depth) * (height - 1)), 0, height - 1),
+    };
+  }
+
+  function getRoomAtScenePoint(x, z) {
+    if (!state.floorBounds || state.roomObjects.length === 0) return null;
+    const width = state.roomObjects[0].userData.maskWidth;
+    const height = state.roomObjects[0].userData.maskHeight;
+    const pixel = scenePointToRoomPixel(x, z, width, height, state.floorBounds);
+    return state.roomObjects.find((room) => room.userData.mask[pixel.y * width + pixel.x]);
+  }
+
   function loadVectorFloorPlan(planData) {
     clearFloorPlan();
     const group = new THREE.Group();
     group.name = "floorPlan";
     state.wallObjects = [];
-    planData.walls.forEach((wall) => addWallToGroup(group, wall));
-    addDoorsToGroup(group, planData, {
+    const vectorTransform = {
       scale: MM_TO_SCENE,
       toScenePoint: (point) => ({ x: point.x * MM_TO_SCENE, z: point.y * MM_TO_SCENE }),
-    });
+    };
+    addWallsToGroup(group, planData, vectorTransform);
     state.scene.add(group);
     state.floorPlanGroup = group;
 
     const width = (planData.width || 6000) * MM_TO_SCENE;
     const depth = (planData.depth || 4000) * MM_TO_SCENE;
     setFloorBounds({ minX: 0, maxX: width, minZ: 0, maxZ: depth });
+    rebuildRoomsFromWalls();
     focusCameraOnArea(width, depth);
     updateSceneStatus("벡터 평면도 로드 완료", "벽체 충돌과 외곽 벽 자석을 적용합니다.");
     updateSafetyState();
   }
 
-  function addWallToGroup(group, wall) {
+  function addWallsToGroup(group, planData, transform) {
+    if (!Array.isArray(planData.walls)) return;
+    planData.walls.forEach((wall) => addWallToGroup(group, wall, transform));
+  }
+
+  function addWallToGroup(group, wall, transform) {
     const { x1, y1, x2, y2 } = wall || {};
     if ([x1, y1, x2, y2].some((v) => typeof v !== "number")) return;
+    const start = transform.toScenePoint({ x: x1, y: y1 });
+    const end = transform.toScenePoint({ x: x2, y: y2 });
     const height = (wall.height || 2400) * MM_TO_SCENE;
-    const thickness = (wall.thickness || 100) * MM_TO_SCENE;
-    const dx = (x2 - x1) * MM_TO_SCENE;
-    const dz = (y2 - y1) * MM_TO_SCENE;
-    const length = Math.sqrt(dx * dx + dz * dz);
-    if (length === 0) return;
+    const thickness = firstNumber(wall.thickness, wall.thickness_px, 100) * transform.scale;
+    const dx = end.x - start.x;
+    const dz = end.z - start.z;
+    if (Math.sqrt(dx * dx + dz * dz) === 0) return;
 
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(length, height, thickness),
-      new THREE.MeshStandardMaterial({ color: 0xd1d5db })
-    );
-    mesh.position.set((x1 + x2) * 0.5 * MM_TO_SCENE, height / 2, (y1 + y2) * 0.5 * MM_TO_SCENE);
-    mesh.rotation.y = -Math.atan2(dz, dx);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    const mesh = createPlanningWallMesh(start, end, thickness, height, {
+      id: wall.id || `wall_${state.wallObjects.length}`,
+      label: wall.id || "벽",
+      editable: wall.editable !== false,
+      source: wall,
+    });
     group.add(mesh);
     state.wallObjects.push(mesh);
   }
 
-  function addDoorsToGroup(group, planData, transform) {
-    getDoorEntries(planData).forEach((door) => addDoorMarkerToGroup(group, door, transform));
-  }
-
-  function getDoorEntries(planData) {
-    const singleDoor = planData.door && !Array.isArray(planData.door) ? [planData.door] : [];
-    return []
-      .concat(Array.isArray(planData.doors) ? planData.doors : [])
-      .concat(Array.isArray(planData.door) ? planData.door : [])
-      .concat(singleDoor)
-      .concat(Array.isArray(planData.openings) ? planData.openings.filter((entry) => String(entry.type || "").toLowerCase().includes("door")) : [])
-      .concat(Array.isArray(planData.doorOpenings) ? planData.doorOpenings : []);
-  }
-
-  function addDoorMarkerToGroup(group, door, transform) {
-    const zone = createDoorSwingZone(door, transform);
-    if (!zone) return;
-    const radius = zone.radius;
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(Math.max(radius - 0.02, 0.01), radius, 32),
-      new THREE.MeshBasicMaterial({ color: 0x004b87, side: THREE.DoubleSide, transparent: true, opacity: 0.5 })
+  function createPlanningWallMesh(start, end, thickness, height, meta) {
+    const dx = end.x - start.x;
+    const dz = end.z - start.z;
+    const length = Math.sqrt(dx * dx + dz * dz);
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(length, 0.055, thickness),
+      new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.78, transparent: true, opacity: 0.52 })
     );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.set(zone.x, 0.02, zone.z);
-    group.add(ring);
-    state.doorSwingZones.push(zone);
-  }
-
-  function createDoorSwingZone(door, transform) {
-    transform = transform || {
-      scale: MM_TO_SCENE,
-      toScenePoint: (point) => ({ x: point.x * MM_TO_SCENE, z: point.y * MM_TO_SCENE }),
+    mesh.position.set((start.x + end.x) * 0.5, 0.018, (start.z + end.z) * 0.5);
+    mesh.rotation.y = -Math.atan2(dz, dx);
+    mesh.userData = {
+      type: "wall",
+      renderMode: "2d",
+      id: meta.id,
+      label: meta.label,
+      editable: meta.editable,
+      source: meta.source,
+      renderHeight: height,
+      wallMaterial: state.activeWallMaterial,
     };
-    const hinge = readDoorPoint(door, [
-      ["hingeX", "hingeY"],
-      ["hingeX", "hingeZ"],
-      ["x", "y"],
-      ["centerX", "centerY"],
-      ["cx", "cy"],
-      ["x1", "y1"],
-    ]);
-    if (!hinge) return null;
-
-    const leafEnd = readDoorPoint(door, [
-      ["x2", "y2"],
-      ["endX", "endY"],
-      ["leafX", "leafY"],
-      ["toX", "toY"],
-    ]);
-    const hingeScene = transform.toScenePoint(hinge);
-    const segmentRadius = leafEnd ? distance2D(hinge, leafEnd) : NaN;
-    const radius = firstNumber(door.radius, door.width, door.length, door.doorWidth, segmentRadius, 900) * transform.scale;
-    if (!Number.isFinite(hingeScene.x) || !Number.isFinite(hingeScene.z) || !Number.isFinite(radius) || radius <= 0) return null;
-
-    const start = readDoorAngle(door, ["startAngle", "start", "angleStart", "fromAngle"]);
-    const end = readDoorAngle(door, ["endAngle", "end", "angleEnd", "toAngle"]);
-    if (start != null && end != null) {
-      return { x: hingeScene.x, z: hingeScene.z, radius, startAngle: start, endAngle: end, fullCircle: false };
-    }
-
-    const base = readDoorAngle(door, ["angle", "rotation", "direction"])
-      ?? (leafEnd ? angleBetweenScenePoints(transform.toScenePoint(hinge), transform.toScenePoint(leafEnd)) : 0);
-    const swing = readDoorAngle(door, ["swingAngle", "openAngle"]) || Math.PI / 2;
-    const signHint = String(door.swing || door.hand || door.open || door.direction || "").toLowerCase();
-    const sign = signHint.includes("left") || signHint.includes("counter") || signHint.includes("ccw") ? -1 : 1;
-    return { x: hingeScene.x, z: hingeScene.z, radius, startAngle: base, endAngle: base + swing * sign, fullCircle: false };
-  }
-
-  function readDoorPoint(source, pairs) {
-    for (const [xKey, yKey] of pairs) {
-      const x = Number(source[xKey]);
-      const y = Number(source[yKey]);
-      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
-    }
-    if (source.hinge && typeof source.hinge === "object") {
-      const x = firstNumber(source.hinge.x, source.hinge.x1, source.hinge.centerX);
-      const y = firstNumber(source.hinge.y, source.hinge.z, source.hinge.y1, source.hinge.centerY);
-      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
-    }
-    if (source.center && typeof source.center === "object") {
-      const x = firstNumber(source.center.x, source.center.centerX);
-      const y = firstNumber(source.center.y, source.center.z, source.center.centerY);
-      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
-    }
-    return null;
-  }
-
-  function distance2D(a, b) {
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    return Math.sqrt(dx * dx + dy * dy);
-  }
-
-  function angleBetweenScenePoints(a, b) {
-    return Math.atan2(b.z - a.z, b.x - a.x);
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    return mesh;
   }
 
   function firstNumber(...values) {
@@ -813,16 +1727,6 @@
       if (Number.isFinite(parsed)) return parsed;
     }
     return NaN;
-  }
-
-  function readDoorAngle(source, keys) {
-    for (const key of keys) {
-      if (source[key] == null) continue;
-      const value = Number(source[key]);
-      if (!Number.isFinite(value)) continue;
-      return Math.abs(value) > Math.PI * 2 ? value * Math.PI / 180 : value;
-    }
-    return null;
   }
 
   function setFloorBounds(bounds) {
@@ -845,9 +1749,12 @@
     state.floorPlanGroup = null;
     state.imageFloorMask = null;
     state.imageWallMask = null;
-    state.imageDoorSwingMask = null;
     state.wallObjects = [];
-    state.doorSwingZones = [];
+    state.floorObjects = [];
+    state.baseFloorObjects = [];
+    state.roomObjects = [];
+    state.selectedRoomId = null;
+    state.selectedWall = null;
     clearVisualization();
   }
 
@@ -858,6 +1765,8 @@
       const res = await fetch("/api/furniture");
       if (!res.ok) throw new Error("API 요청 실패");
       state.catalogItems = await res.json();
+      renderCatalogTabs();
+      renderFurnitureCategoryFilters();
       renderColorFilters();
       renderCatalog();
       updateEstimate();
@@ -865,6 +1774,58 @@
       console.error(err);
       listEl.innerHTML = "데이터를 불러올 수 없습니다.";
     }
+  }
+
+  function renderCatalogTabs() {
+    const el = document.getElementById("catalog-tabs");
+    if (!el) return;
+    el.innerHTML = "";
+    CATALOG_SECTIONS.forEach((section) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "catalog-tab-btn" + (state.activeCatalogSection === section.value ? " active" : "");
+      button.textContent = section.label;
+      button.addEventListener("click", () => {
+        state.activeCatalogSection = section.value;
+        renderCatalogTabs();
+        updateCatalogSections();
+        renderCatalog();
+      });
+      el.appendChild(button);
+    });
+    updateCatalogSections();
+  }
+
+  function updateCatalogSections() {
+    const isFurniture = state.activeCatalogSection === "furniture";
+    setElementVisible("furniture-category-filter", isFurniture);
+    setElementVisible("color-filter", isFurniture);
+    setElementVisible("furniture-list", isFurniture);
+    setElementVisible("floor-material-section", state.activeCatalogSection === "floor");
+    setElementVisible("wall-material-section", state.activeCatalogSection === "wallpaper");
+  }
+
+  function setElementVisible(id, visible) {
+    const el = document.getElementById(id);
+    if (el) el.hidden = !visible;
+  }
+
+  function renderFurnitureCategoryFilters() {
+    const el = document.getElementById("furniture-category-filter");
+    if (!el) return;
+    el.innerHTML = "";
+    FURNITURE_CATEGORY_FILTERS.forEach((filter) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "category-filter-btn" + (state.activeFurnitureCategory === filter.value ? " active" : "");
+      button.textContent = filter.label;
+      button.addEventListener("click", () => {
+        state.activeFurnitureCategory = filter.value;
+        renderFurnitureCategoryFilters();
+        renderCatalog();
+      });
+      el.appendChild(button);
+    });
   }
 
   function renderColorFilters() {
@@ -900,10 +1861,258 @@
     });
   }
 
+  function renderFloorMaterials() {
+    const el = document.getElementById("floor-materials");
+    const label = document.getElementById("floor-material-name");
+    if (!el) return;
+    el.innerHTML = "";
+    FLOOR_MATERIALS.forEach((material) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "material-btn" + (state.activeFloorMaterial === material.value ? " active" : "");
+      button.innerHTML = `<div class="material-swatch"></div><span>${escapeHtml(material.label)}</span>`;
+      button.querySelector(".material-swatch").style.background = material.swatch;
+      button.addEventListener("click", () => {
+        state.activeFloorMaterial = material.value;
+        applyFloorMaterial();
+        renderFloorMaterials();
+      });
+      el.appendChild(button);
+    });
+    const active = getActiveFloorMaterial();
+    if (label) label.textContent = active.label;
+  }
+
+  function renderWallMaterials() {
+    const el = document.getElementById("wall-materials");
+    const label = document.getElementById("wall-material-name");
+    if (!el) return;
+    el.innerHTML = "";
+    WALL_MATERIALS.forEach((material) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "material-btn" + (state.activeWallMaterial === material.value ? " active" : "");
+      button.innerHTML = `<div class="material-swatch"></div><span>${escapeHtml(material.label)}</span>`;
+      button.querySelector(".material-swatch").style.background = material.swatch;
+      button.addEventListener("click", () => {
+        state.activeWallMaterial = material.value;
+        applyWallMaterial();
+        renderWallMaterials();
+      });
+      el.appendChild(button);
+    });
+    const active = getActiveWallMaterial();
+    if (label) label.textContent = active.label;
+  }
+
+  function getActiveFloorMaterial() {
+    return FLOOR_MATERIALS.find((material) => material.value === state.activeFloorMaterial) || FLOOR_MATERIALS[0];
+  }
+
+  function getFloorMaterialByValue(value) {
+    return FLOOR_MATERIALS.find((material) => material.value === value) || getActiveFloorMaterial();
+  }
+
+  function getActiveWallMaterial() {
+    return WALL_MATERIALS.find((material) => material.value === state.activeWallMaterial) || WALL_MATERIALS[0];
+  }
+
+  function getWallMaterialByValue(value) {
+    return WALL_MATERIALS.find((material) => material.value === value) || getActiveWallMaterial();
+  }
+
+  function createFloorMaterial() {
+    const material = getActiveFloorMaterial();
+    const texture = createFloorTexture(material);
+    return new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: texture,
+      roughness: 0.82,
+      side: THREE.DoubleSide,
+    });
+  }
+
+  function createFloorTexture(material) {
+    const canvas = createFloorPatternCanvas(material, 256, 256);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(4, 4);
+    return texture;
+  }
+
+  function createFloorPatternCanvas(material, width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = `#${material.color.toString(16).padStart(6, "0")}`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (material.value === "herringbone") {
+      drawHerringbone(ctx);
+    } else if (material.value === "grass") {
+      drawSpeckles(ctx, "#6f8b5a", "#a8bc83");
+    } else if (material.value === "graytile") {
+      drawPlanks(ctx, ["#cfd2cf", "#aeb2af", "#d9dbd8", "#999f9c"]);
+    } else {
+      const palettes = {
+        oak: ["#6f432f", "#9c6b4d", "#5f3828", "#b6815c"],
+        lightwood: ["#eadcc4", "#cdb895", "#f1e4cc", "#c7b08d"],
+        cream: ["#e4d2ae", "#c8ac7c", "#eadbbd", "#baa071"],
+      };
+      drawPlanks(ctx, palettes[material.value] || palettes.oak);
+    }
+    return canvas;
+  }
+
+  function drawPlanks(ctx, colors) {
+    const plankWidth = 32;
+    const width = ctx.canvas.width;
+    const height = ctx.canvas.height;
+    for (let x = 0; x < width; x += plankWidth) {
+      ctx.fillStyle = colors[(x / plankWidth) % colors.length];
+      ctx.fillRect(x, 0, plankWidth, height);
+      ctx.strokeStyle = "rgba(31, 41, 55, 0.18)";
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      for (let y = 0; y < height; y += 64) {
+        ctx.strokeStyle = "rgba(255,255,255,0.12)";
+        ctx.beginPath();
+        ctx.moveTo(x + 4, y + 12);
+        ctx.lineTo(x + plankWidth - 4, y + 22);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawHerringbone(ctx) {
+    const width = ctx.canvas.width;
+    const height = ctx.canvas.height;
+    ctx.strokeStyle = "rgba(73, 49, 31, 0.34)";
+    ctx.lineWidth = 10;
+    for (let i = -width; i < width * 2; i += 32) {
+      ctx.beginPath();
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i + width / 2, height / 2);
+      ctx.lineTo(i, height);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 3;
+    for (let i = -width; i < width * 2; i += 32) {
+      ctx.beginPath();
+      ctx.moveTo(i + 16, 0);
+      ctx.lineTo(i + width / 2 + 16, height / 2);
+      ctx.lineTo(i + 16, height);
+      ctx.stroke();
+    }
+  }
+
+  function drawSpeckles(ctx, dark, light) {
+    for (let i = 0; i < 850; i += 1) {
+      ctx.fillStyle = i % 2 ? dark : light;
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(Math.random() * ctx.canvas.width, Math.random() * ctx.canvas.height, 2, 5);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function applyFloorMaterial() {
+    const targets = state.selectedRoomId
+      ? state.roomObjects.filter((room) => room.userData.id === state.selectedRoomId)
+      : state.roomObjects;
+    targets.forEach((room) => {
+      room.userData.floorMaterial = state.activeFloorMaterial;
+    });
+    refreshRoomFloorMaterials(targets);
+    clearVisualization();
+    updateSceneStatus("바닥 마감재 적용", `${state.selectedRoomId ? "선택한 방을" : "전체 방을"} ${getActiveFloorMaterial().label} 마감으로 변경했습니다.`);
+  }
+
+  function refreshRoomFloorMaterials(rooms) {
+    rooms.forEach((room) => {
+      const material = createMaskedRoomMaterial({
+        id: room.userData.id,
+        mask: room.userData.mask,
+        floorMaterial: room.userData.floorMaterial,
+      }, {
+        width: room.userData.maskWidth,
+        height: room.userData.maskHeight,
+      });
+      if (room.material) {
+        if (room.material.map) room.material.map.dispose();
+        room.material.dispose();
+      }
+      room.material = material;
+    });
+  }
+
+  function createWallMaterial() {
+    const material = getActiveWallMaterial();
+    return createWallMaterialFromValue(material.value);
+  }
+
+  function createWallMaterialFromValue(value) {
+    const material = getWallMaterialByValue(value);
+    return new THREE.MeshStandardMaterial({
+      color: material.color,
+      roughness: 0.72,
+      transparent: true,
+      opacity: 0.94,
+    });
+  }
+
+  function applyWallMaterial() {
+    const active = getActiveWallMaterial();
+    const walls = state.selectedRoomId ? getWallsForRoom(state.selectedRoomId) : state.wallObjects;
+    walls.forEach((wall) => {
+      if (wall.material) wall.material.color.setHex(active.color);
+      wall.userData.wallMaterial = state.activeWallMaterial;
+    });
+    state.roomObjects.forEach((room) => {
+      if (!state.selectedRoomId || room.userData.id === state.selectedRoomId) {
+        room.userData.wallMaterial = state.activeWallMaterial;
+      }
+    });
+    clearVisualization();
+    updateSceneStatus("벽지 적용", `${state.selectedRoomId ? "선택한 방을" : "전체 방을"} ${active.label} 벽지로 변경했습니다.`);
+  }
+
+  function getWallsForRoom(roomId) {
+    const room = state.roomObjects.find((entry) => entry.userData.id === roomId);
+    if (!room || !state.floorBounds) return [];
+    return state.wallObjects.filter((wall) => wallTouchesRoom(wall, room));
+  }
+
+  function wallTouchesRoom(wall, room) {
+    const width = room.userData.maskWidth;
+    const height = room.userData.maskHeight;
+    const footprint = getPlanFootprint(wall);
+    return footprint.some((point) => {
+      const pixel = scenePointToRoomPixel(point.x, point.z, width, height, state.floorBounds);
+      for (let dy = -3; dy <= 3; dy += 1) {
+        for (let dx = -3; dx <= 3; dx += 1) {
+          const x = pixel.x + dx;
+          const y = pixel.y + dy;
+          if (x < 0 || y < 0 || x >= width || y >= height) continue;
+          if (room.userData.mask[y * width + x]) return true;
+        }
+      }
+      return false;
+    });
+  }
+
   function renderCatalog() {
     const listEl = document.getElementById("furniture-list");
     const countEl = document.getElementById("catalog-count");
     if (!listEl) return;
+    if (state.activeCatalogSection !== "furniture") {
+      if (countEl) countEl.textContent = state.activeCatalogSection === "floor" ? `${FLOOR_MATERIALS.length} finishes` : `${WALL_MATERIALS.length} finishes`;
+      return;
+    }
     const items = getFilteredCatalogItems();
     if (countEl) countEl.textContent = `${items.length} items`;
     listEl.innerHTML = "";
@@ -918,8 +2127,19 @@
   }
 
   function getFilteredCatalogItems() {
-    if (state.activeColor === "all") return state.catalogItems;
-    return state.catalogItems.filter((item) => normalizeColor(item.color) === state.activeColor);
+    return state.catalogItems.filter((item) => {
+      const colorOk = state.activeColor === "all" || normalizeColor(item.color) === state.activeColor;
+      const categoryOk = furnitureCategoryMatches(item, state.activeFurnitureCategory);
+      return colorOk && categoryOk;
+    });
+  }
+
+  function furnitureCategoryMatches(item, filterValue) {
+    if (filterValue === "all") return true;
+    const filter = FURNITURE_CATEGORY_FILTERS.find((entry) => entry.value === filterValue);
+    if (!filter) return true;
+    const text = `${item.category || ""} ${item.product_name || ""} ${item.name || ""} ${item.size || ""}`.toLowerCase();
+    return filter.keywords.some((keyword) => text.includes(keyword.toLowerCase()));
   }
 
   function createFurnitureCard(item) {
@@ -984,8 +2204,78 @@
   function spawnFurniture(item, options) {
     options = options || {};
     clearVisualization();
-    const path = item.model_path || resolveModelPath(item);
-    loadFurnitureModel([path, "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"], item, options);
+    const pivot = create2DFurniturePivot(item);
+    pivot.position.set(options.x || 0, pivot.userData.centerY || 0, options.z || 0);
+    pivot.rotation.y = options.rot || 0;
+    state.scene.add(pivot);
+    state.furnitureMeshes.push(pivot);
+
+    const constrained = applyWallMagnetAndBounds(pivot, pivot.position);
+    pivot.position.copy(constrained.position);
+    if (!getBlockedPlacementAt(pivot, pivot.position)) {
+      pivot.userData.lastSafePosition = pivot.position.clone();
+    }
+
+    if (!state.suppressAutoSelect && options.select !== false) {
+      selectFurniture(pivot, document.getElementById("furniture-toolbar"));
+    }
+    updateSafetyState();
+    updateEstimate();
+  }
+
+  function create2DFurniturePivot(item) {
+    const width = Math.max((Number(item.width) || 150) * 0.01, 0.18);
+    const depth = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    const height = 0.045;
+    const color = furniturePlanColor(item);
+    const pivot = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(width, height, depth),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.78, transparent: true, opacity: 0.78 })
+    );
+    body.position.y = height / 2;
+    body.castShadow = false;
+    body.receiveShadow = true;
+
+    const outline = new THREE.LineSegments(
+      new THREE.EdgesGeometry(body.geometry),
+      new THREE.LineBasicMaterial({ color: 0x172f5b })
+    );
+    outline.position.copy(body.position);
+    pivot.add(body, outline);
+    pivot.name = item.product_name || "furniture";
+    pivot.userData = {
+      type: "furniture",
+      renderMode: "2d",
+      skuId: item.sku_id,
+      productName: item.product_name || "자재",
+      label: item.label || item.product_name || "자재",
+      category: item.category || "",
+      color: normalizeColor(item.color),
+      modelPath: item.model_path || resolveModelPath(item),
+      imageUrl: item.image_url || "",
+      productUrl: item.product_url || "",
+      price: parsePrice(item.price),
+      rawPrice: item.price,
+      size: item.size || "",
+      dimensions: {
+        width: Number(item.width) || 0,
+        depth: Number(item.depth) || 0,
+        height: Number(item.height) || 0,
+      },
+      centerY: 0,
+    };
+    return pivot;
+  }
+
+  function furniturePlanColor(item) {
+    switch (normalizeColor(item.color)) {
+      case "black": return 0x1f2937;
+      case "brown": return 0x8b5e3c;
+      case "blue": return 0x2159b7;
+      case "white": return 0xf8fafc;
+      default: return 0x9ca3af;
+    }
   }
 
   function loadFurnitureModel(paths, item, options, index) {
@@ -1116,13 +2406,10 @@
   function getBlockedPlacementReason(model, box) {
     if (isOutsideBounds(box)) return "평면도 경계 밖";
     if (boxIntersectsImageWall(box)) return "이미지 평면도 벽";
-    if (boxIntersectsImageDoorSwing(box)) return "이미지 문 열림 궤적";
     if (boxOutsideImageFloor(box)) return "타일 바닥 영역 밖";
+    const modelFootprint = getPlanFootprint(model);
     for (const wall of state.wallObjects) {
-      if (boxesIntersect(getPlanBox(wall), box)) return "벡터 벽체";
-    }
-    for (const zone of state.doorSwingZones) {
-      if (boxIntersectsDoorSwing(box, zone)) return "문 열림 궤적";
+      if (footprintsIntersect(modelFootprint, getPlanFootprint(wall))) return "벡터 벽체";
     }
     return "";
   }
@@ -1135,16 +2422,6 @@
     const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
     const hits = sumMaskArea(mask.integral, mask.width, pixelBox.minX, pixelBox.minY, pixelBox.maxX, pixelBox.maxY);
     return hits >= 3 && hits / area >= IMAGE_WALL_HIT_RATIO;
-  }
-
-  function boxIntersectsImageDoorSwing(box) {
-    if (!state.imageDoorSwingMask || !state.floorBounds) return false;
-    const mask = state.imageDoorSwingMask;
-    const bounds = state.floorBounds;
-    const pixelBox = planBoxToPixelBox(box, mask, bounds);
-    const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
-    const hits = sumMaskArea(mask.integral, mask.width, pixelBox.minX, pixelBox.minY, pixelBox.maxX, pixelBox.maxY);
-    return hits >= 2 && hits / area >= IMAGE_DOOR_HIT_RATIO;
   }
 
   function boxOutsideImageFloor(box) {
@@ -1208,50 +2485,6 @@
     return false;
   }
 
-  function boxIntersectsDoorSwing(box, zone) {
-    const width = Math.max(box.maxX - box.minX, DOOR_SWING_SAMPLE_STEP);
-    const depth = Math.max(box.maxZ - box.minZ, DOOR_SWING_SAMPLE_STEP);
-    const stepsX = Math.max(2, Math.ceil(width / DOOR_SWING_SAMPLE_STEP));
-    const stepsZ = Math.max(2, Math.ceil(depth / DOOR_SWING_SAMPLE_STEP));
-
-    for (let ix = 0; ix <= stepsX; ix += 1) {
-      const x = box.minX + (width * ix) / stepsX;
-      for (let iz = 0; iz <= stepsZ; iz += 1) {
-        const z = box.minZ + (depth * iz) / stepsZ;
-        if (pointInDoorSwing(x, z, zone)) return true;
-      }
-    }
-    return pointInBox(zone.x, zone.z, box);
-  }
-
-  function pointInDoorSwing(x, z, zone) {
-    const dx = x - zone.x;
-    const dz = z - zone.z;
-    const distance = Math.sqrt(dx * dx + dz * dz);
-    if (distance > zone.radius + COLLISION_EPSILON) return false;
-    if (zone.fullCircle) return true;
-    return angleBetween(Math.atan2(dz, dx), zone.startAngle, zone.endAngle);
-  }
-
-  function pointInBox(x, z, box) {
-    return x >= box.minX && x <= box.maxX && z >= box.minZ && z <= box.maxZ;
-  }
-
-  function angleBetween(angle, start, end) {
-    const normalizedAngle = normalizeAngle(angle);
-    const normalizedStart = normalizeAngle(start);
-    const normalizedEnd = normalizeAngle(end);
-    if (normalizedStart <= normalizedEnd) {
-      return normalizedAngle >= normalizedStart && normalizedAngle <= normalizedEnd;
-    }
-    return normalizedAngle >= normalizedStart || normalizedAngle <= normalizedEnd;
-  }
-
-  function normalizeAngle(angle) {
-    const twoPi = Math.PI * 2;
-    return ((angle % twoPi) + twoPi) % twoPi;
-  }
-
   function sumMaskArea(integral, width, minX, minY, maxX, maxY) {
     const stride = width + 1;
     const x1 = minX;
@@ -1284,7 +2517,7 @@
       for (let j = i + 1; j < state.furnitureMeshes.length; j += 1) {
         const a = state.furnitureMeshes[i];
         const b = state.furnitureMeshes[j];
-        if (boxesIntersect(getPlanBox(a), getPlanBox(b))) {
+        if (footprintsIntersect(getPlanFootprint(a), getPlanFootprint(b))) {
           warnings.push(`${a.userData.label} / ${b.userData.label} 간 충돌`);
           colliding.add(a);
           colliding.add(b);
@@ -1307,6 +2540,80 @@
       && a.maxX > b.minX + COLLISION_EPSILON
       && a.minZ < b.maxZ - COLLISION_EPSILON
       && a.maxZ > b.minZ + COLLISION_EPSILON;
+  }
+
+  function getPlanFootprint(object) {
+    const dims = getFootprintDimensions(object);
+    if (!dims) {
+      const box = getPlanBox(object);
+      return [
+        { x: box.minX, z: box.minZ },
+        { x: box.maxX, z: box.minZ },
+        { x: box.maxX, z: box.maxZ },
+        { x: box.minX, z: box.maxZ },
+      ];
+    }
+
+    const halfW = dims.width / 2;
+    const halfD = dims.depth / 2;
+    const cos = Math.cos(object.rotation.y || 0);
+    const sin = Math.sin(object.rotation.y || 0);
+    return [
+      { x: -halfW, z: -halfD },
+      { x: halfW, z: -halfD },
+      { x: halfW, z: halfD },
+      { x: -halfW, z: halfD },
+    ].map((point) => ({
+      x: object.position.x + point.x * cos + point.z * sin,
+      z: object.position.z - point.x * sin + point.z * cos,
+    }));
+  }
+
+  function getFootprintDimensions(object) {
+    if (object.userData && object.userData.type === "furniture" && object.userData.dimensions) {
+      return {
+        width: Math.max(Number(object.userData.dimensions.width) * 0.01, 0.01),
+        depth: Math.max(Number(object.userData.dimensions.depth) * 0.01, 0.01),
+      };
+    }
+    if (object.userData && object.userData.type === "wall" && object.geometry && object.geometry.parameters) {
+      return {
+        width: Math.max(Number(object.geometry.parameters.width), 0.01),
+        depth: Math.max(Number(object.geometry.parameters.depth), 0.01),
+      };
+    }
+    return null;
+  }
+
+  function footprintsIntersect(a, b) {
+    if (!a || !b) return false;
+    return !hasSeparatingAxis(a, b) && !hasSeparatingAxis(b, a);
+  }
+
+  function hasSeparatingAxis(a, b) {
+    for (let i = 0; i < a.length; i += 1) {
+      const current = a[i];
+      const next = a[(i + 1) % a.length];
+      const edge = { x: next.x - current.x, z: next.z - current.z };
+      const axis = { x: -edge.z, z: edge.x };
+      const projA = projectFootprint(a, axis);
+      const projB = projectFootprint(b, axis);
+      if (projA.max <= projB.min + COLLISION_EPSILON || projB.max <= projA.min + COLLISION_EPSILON) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function projectFootprint(points, axis) {
+    let min = Infinity;
+    let max = -Infinity;
+    points.forEach((point) => {
+      const value = point.x * axis.x + point.z * axis.z;
+      min = Math.min(min, value);
+      max = Math.max(max, value);
+    });
+    return { min, max };
   }
 
   function isOutsideBounds(box) {
@@ -1417,22 +2724,92 @@
     updateEstimate();
   }
 
-  function acceptLayout() {
+  async function acceptLayout() {
     clearSelectionHighlight();
     state.selectedFurniture = null;
+    state.selectedWall = null;
     const toolbar = document.getElementById("furniture-toolbar");
     if (toolbar) toolbar.style.display = "none";
     clearVisualization();
     const bounds = calculateLayoutBounds();
     const visualization = new THREE.Group();
     visualization.name = "acceptedLayoutVisualization";
-    addPerimeterWalls(visualization, bounds);
-    addFloorFinish(visualization, bounds);
+    addRenderedRoomFloors(visualization);
+    addRenderedWalls(visualization);
     state.scene.add(visualization);
     state.visualizationGroup = visualization;
+    setPlanningFurnitureVisible(false);
+    setPlanningWallsVisible(false);
+    updateSceneStatus("3D 렌더링 중", "배치한 가구를 3D 모델로 변환하고 있습니다.");
+    await addRenderedFurnitureModels(visualization);
     focusCameraOnArea(bounds.width, bounds.depth, bounds.center);
     updateSafetyState();
     updateSceneStatus("3D 렌더링 완료", "벽체, 바닥, 배치 자재, 견적 상태가 갱신되었습니다.");
+  }
+
+  async function addRenderedFurnitureModels(group) {
+    const jobs = state.furnitureMeshes.map((model) => addRenderedFurnitureModel(group, model));
+    await Promise.allSettled(jobs);
+  }
+
+  async function addRenderedFurnitureModel(group, planModel) {
+    const item = exportCatalogLikeItem(planModel);
+    const paths = [item.model_path, "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"].filter(Boolean);
+    const gltf = await loadGltfWithFallback(paths);
+    if (!gltf) return;
+
+    const model = gltf.scene;
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const targetW = Math.max((Number(item.width) || 150) * 0.01, 0.18);
+    const targetH = Math.max((Number(item.height) || 80) * 0.01, 0.18);
+    const targetD = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
+
+    const pivot = createCenteredFurniturePivot(model, item);
+    pivot.position.set(planModel.position.x, pivot.userData.centerY || 0, planModel.position.z);
+    pivot.rotation.y = planModel.rotation.y;
+    group.add(pivot);
+  }
+
+  function loadGltfWithFallback(paths, index) {
+    index = index || 0;
+    const path = paths[index];
+    if (!path) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      gltfLoader.load(
+        path,
+        (gltf) => resolve(gltf),
+        undefined,
+        () => resolve(loadGltfWithFallback(paths, index + 1))
+      );
+    });
+  }
+
+  function setPlanningFurnitureVisible(visible) {
+    state.furnitureMeshes.forEach((model) => {
+      model.visible = visible;
+    });
+  }
+
+  function setPlanningWallsVisible(visible) {
+    state.wallObjects.forEach((wall) => {
+      wall.visible = visible;
+    });
+  }
+
+  function addRenderedWalls(group) {
+    state.wallObjects.forEach((wall) => {
+      const params = wall.geometry && wall.geometry.parameters;
+      if (!params) return;
+      const height = wall.userData.renderHeight || 2.4;
+      const material = createWallMaterialFromValue(wall.userData.wallMaterial || state.activeWallMaterial);
+      const rendered = createWall(params.width, height, params.depth, material);
+      material.dispose();
+      rendered.position.set(wall.position.x, height / 2, wall.position.z);
+      rendered.rotation.y = wall.rotation.y;
+      group.add(rendered);
+    });
   }
 
   function calculateLayoutBounds() {
@@ -1448,23 +2825,6 @@
     };
   }
 
-  function addPerimeterWalls(group, bounds) {
-    const wallHeight = 2.7;
-    const wallThickness = 0.12;
-    const material = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.72, transparent: true, opacity: 0.9 });
-    const north = createWall(bounds.width, wallHeight, wallThickness, material);
-    north.position.set(bounds.center.x, wallHeight / 2, bounds.minZ);
-    const south = createWall(bounds.width, wallHeight, wallThickness, material);
-    south.position.set(bounds.center.x, wallHeight / 2, bounds.maxZ);
-    const west = createWall(bounds.depth, wallHeight, wallThickness, material);
-    west.rotation.y = Math.PI / 2;
-    west.position.set(bounds.minX, wallHeight / 2, bounds.center.z);
-    const east = createWall(bounds.depth, wallHeight, wallThickness, material);
-    east.rotation.y = Math.PI / 2;
-    east.position.set(bounds.maxX, wallHeight / 2, bounds.center.z);
-    group.add(north, south, west, east);
-  }
-
   function createWall(length, height, thickness, material) {
     const wall = new THREE.Mesh(new THREE.BoxGeometry(length, height, thickness), material.clone());
     wall.receiveShadow = true;
@@ -1472,15 +2832,14 @@
     return wall;
   }
 
-  function addFloorFinish(group, bounds) {
-    const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(bounds.width, bounds.depth),
-      new THREE.MeshStandardMaterial({ color: 0xe5e7eb, roughness: 0.86, transparent: true, opacity: state.floorPlanGroup ? 0.22 : 1 })
-    );
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.set(bounds.center.x, -0.004, bounds.center.z);
-    floor.receiveShadow = true;
-    group.add(floor);
+  function addRenderedRoomFloors(group) {
+    state.roomObjects.forEach((room) => {
+      const clone = room.clone();
+      clone.material = room.material.clone();
+      if (room.material.map) clone.material.map = room.material.map.clone();
+      clone.position.y = -0.006;
+      group.add(clone);
+    });
   }
 
   function clearVisualization() {
@@ -1488,12 +2847,16 @@
     state.scene.remove(state.visualizationGroup);
     disposeObject3D(state.visualizationGroup);
     state.visualizationGroup = null;
+    setPlanningFurnitureVisible(true);
+    setPlanningWallsVisible(true);
   }
 
   function saveLayout() {
     const payload = {
       savedAt: new Date().toISOString(),
       activePattern: state.activePattern,
+      activeFloorMaterial: state.activeFloorMaterial,
+      activeWallMaterial: state.activeWallMaterial,
       floorBounds: state.floorBounds,
       items: state.furnitureMeshes.map((model) => ({
         skuId: model.userData.skuId,
@@ -1519,6 +2882,12 @@
       clearFurniture();
       if (payload.floorBounds) setFloorBounds(payload.floorBounds);
       state.activePattern = payload.activePattern || "A";
+      state.activeFloorMaterial = payload.activeFloorMaterial || state.activeFloorMaterial;
+      state.activeWallMaterial = payload.activeWallMaterial || state.activeWallMaterial;
+      applyFloorMaterial();
+      applyWallMaterial();
+      renderFloorMaterials();
+      renderWallMaterials();
       renderTrendPatterns();
       state.suppressAutoSelect = true;
       payload.items.forEach((entry) => {

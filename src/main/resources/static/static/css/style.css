@@ -116,6 +116,12 @@ label {
   color: var(--blue-900);
 }
 
+.ghost-btn.active {
+  background: #eef6ff;
+  border-color: var(--blue-800);
+  color: var(--blue-900);
+}
+
 .primary-btn {
   background: var(--brand-gradient);
   color: var(--white);
@@ -174,7 +180,8 @@ main {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 20px;
 }
 
@@ -289,7 +296,23 @@ main {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.color-filter-btn {
+.catalog-tabs,
+.category-filter {
+  display: grid;
+  gap: 6px;
+}
+
+.catalog-tabs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.category-filter {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.color-filter-btn,
+.catalog-tab-btn,
+.category-filter-btn {
   align-items: center;
   background: var(--gray-050);
   border: 1px solid var(--gray-200);
@@ -305,10 +328,17 @@ main {
   padding: 7px;
 }
 
-.color-filter-btn.active {
+.color-filter-btn.active,
+.catalog-tab-btn.active,
+.category-filter-btn.active {
   background: #eef6ff;
   border-color: var(--blue-800);
   color: var(--blue-900);
+}
+
+.catalog-tab-btn,
+.category-filter-btn {
+  font-size: 12px;
 }
 
 .swatch {
@@ -316,6 +346,43 @@ main {
   border-radius: 50%;
   height: 12px;
   width: 12px;
+}
+
+.material-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.material-btn {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  text-align: left;
+}
+
+.material-btn.active {
+  border-color: var(--blue-800);
+  box-shadow: 0 0 0 2px rgba(33, 89, 183, 0.12);
+}
+
+.material-swatch {
+  border: 1px solid rgba(17, 24, 39, 0.14);
+  border-radius: 6px;
+  min-height: 76px;
+}
+
+.material-btn span {
+  color: var(--gray-700);
+  font-size: 12px;
+  font-weight: 760;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #furniture-list {

@@ -107,17 +107,26 @@ def extract_wall_mask(img, dark_thresh=100, min_area_ratio=5e-5, debug_dir=None)
 # ──────────────────────────────────────────────
 def vectorize(mask, thickness, debug_dir=None):
     klen = max(int(thickness * 2), 40)  # 이 길이 이상 이어진 것만 벽으로 인정
+    # 완만한 대각선 벽은 가로/세로 열림에도 살아남을 수 있는데, 그 경우
+    # 컴포넌트의 바운딩박스 높이/폭이 실제 벽 두께가 아니라 대각선이 지나가는
+    # 수직/수평 범위 전체가 되어버려 두께가 폭발한다(방 하나를 통째로 덮는
+    # 두꺼운 벽처럼 렌더링되는 원인). 실제 두께 대비 이 배수를 넘는 컴포넌트는
+    # 가짜 가로/세로 벽으로 보지 않고 잔여 영역으로 돌려보내 아래 Hough 사선
+    # 보완 단계가 정확한 두께로 다시 잡게 한다.
+    max_axis_thickness = max(thickness * 3, klen * 0.75)
 
     kh = cv2.getStructuringElement(cv2.MORPH_RECT, (klen, 1))
     kv = cv2.getStructuringElement(cv2.MORPH_RECT, (1, klen))
     hmask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kh)
     vmask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kv)
 
-    segs = (_components_to_centerlines(hmask, True, klen)
-            + _components_to_centerlines(vmask, False, klen))
+    hsegs, hvalid = _components_to_centerlines(hmask, True, klen, max_axis_thickness)
+    vsegs, vvalid = _components_to_centerlines(vmask, False, klen, max_axis_thickness)
+    segs = hsegs + vsegs
 
-    # 수평/수직으로 설명되지 않은 잔여 영역에서 사선 벽 보완 (Hough)
-    residual = cv2.subtract(mask, cv2.bitwise_or(hmask, vmask))
+    # 수평/수직으로 설명되지 않은 잔여 영역(위에서 걸러진 대각선 오탐 포함)에서
+    # 사선 벽 보완 (Hough)
+    residual = cv2.subtract(mask, cv2.bitwise_or(hvalid, vvalid))
     residual = cv2.morphologyEx(
         residual, cv2.MORPH_OPEN,
         cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
@@ -143,21 +152,29 @@ def vectorize(mask, thickness, debug_dir=None):
     return segs
 
 
-def _components_to_centerlines(m, horizontal, klen):
-    """오리엔테이션별 마스크의 각 연결 컴포넌트 → 중심선 세그먼트 (x1,y1,x2,y2,thickness)"""
+def _components_to_centerlines(m, horizontal, klen, max_thickness):
+    """오리엔테이션별 마스크의 각 연결 컴포넌트 → 중심선 세그먼트 (x1,y1,x2,y2,thickness).
+
+    bbox 두께(가로 성분이면 높이, 세로 성분이면 폭)가 max_thickness를 넘는
+    컴포넌트는 실제 벽이 아니라 완만한 대각선이 우연히 걸린 것으로 보고
+    제외한다 (그 픽셀은 valid에도 포함하지 않아 잔여 영역/Hough로 넘어감).
+    반환값의 두 번째 항목은 채택된 컴포넌트만 남긴 마스크.
+    """
     segs = []
     n, labels, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    valid = np.zeros_like(m)
     for i in range(1, n):
         x, y, w, h, _area = stats[i]
         if horizontal:
-            if w < klen:
+            if w < klen or h > max_thickness:
                 continue
             segs.append((x, y + h // 2, x + w, y + h // 2, h))
         else:
-            if h < klen:
+            if h < klen or w > max_thickness:
                 continue
             segs.append((x + w // 2, y, x + w // 2, y + h, w))
-    return segs
+        valid[labels == i] = 255
+    return segs, valid
 
 
 def merge_collinear(segs, gap):

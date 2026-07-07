@@ -125,9 +125,11 @@
     floorObjects: [],
     baseFloorObjects: [],
     roomObjects: [],
+    wallOverlay: null,
     selectedRoomId: null,
     imageFloorMask: null,
     imageWallMask: null,
+    wallRenderRects: null,
     floorLockedToPlan: false,
     wallObjects: [],
     furnitureMeshes: [],
@@ -281,7 +283,7 @@
     if (wallHits.length > 0) {
       const wall = wallHits[0].object;
       selectWall(wall, toolbar);
-      if (isEditableWall(wall) && raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
+      if (isMovableWall(wall) && raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
         state.wallDragOffset.copy(planeIntersectPoint).sub(wall.position);
         state.isWallDragging = true;
         state.controls.enabled = false;
@@ -394,7 +396,7 @@
       state.selectionHelper = new THREE.BoxHelper(model, 0x004b87);
       state.scene.add(state.selectionHelper);
       if (toolbar) toolbar.style.display = "flex";
-      setWallToolbarLocked(toolbar, false);
+      setWallToolbarLocked(toolbar, null);
       if (labelInput) labelInput.value = model.userData.label || model.userData.productName || "자재";
     } else if (toolbar) {
       toolbar.style.display = "none";
@@ -412,24 +414,24 @@
       state.selectionHelper = new THREE.BoxHelper(wall, 0xf59e0b);
       state.scene.add(state.selectionHelper);
       if (toolbar) toolbar.style.display = "flex";
-      setWallToolbarLocked(toolbar, !isEditableWall(wall));
+      setWallToolbarLocked(toolbar, wall);
       if (labelInput) labelInput.value = wall.userData.label || wall.userData.id || "벽";
       updateSceneStatus(
-        wall.userData.locked ? "구조벽 잠금" : "가벽 편집 모드",
-        wall.userData.locked ? "두꺼운 구조벽은 이동, 회전, 삭제할 수 없습니다." : "선택한 가벽은 이동, 회전, 삭제할 수 있습니다."
+        isDeletableWall(wall) ? "가벽 삭제 가능" : "구조벽 잠금",
+        isDeletableWall(wall) ? "200mm 이하 가벽만 삭제할 수 있습니다." : "200mm를 초과하는 구조벽은 삭제할 수 없습니다."
       );
     } else if (toolbar && !state.selectedFurniture) {
       toolbar.style.display = "none";
-      setWallToolbarLocked(toolbar, false);
+      setWallToolbarLocked(toolbar, null);
     }
   }
 
-  function setWallToolbarLocked(toolbar, locked) {
+  function setWallToolbarLocked(toolbar, wall) {
     if (!toolbar) return;
     const rotate = document.getElementById("btn-rotate");
     const del = document.getElementById("btn-delete");
-    if (rotate) rotate.disabled = locked;
-    if (del) del.disabled = locked;
+    if (rotate) rotate.disabled = wall ? !isMovableWall(wall) : false;
+    if (del) del.disabled = wall ? !isDeletableWall(wall) : false;
   }
 
   function selectRoom(room) {
@@ -456,8 +458,8 @@
 
   function rotateSelectedFurniture() {
     if (state.selectedWall) {
-      if (!isEditableWall(state.selectedWall)) {
-        updateSafetyState("구조벽은 회전할 수 없습니다.");
+      if (!isMovableWall(state.selectedWall)) {
+        updateSafetyState("추출된 벽은 회전할 수 없습니다.");
         return;
       }
       clearVisualization();
@@ -478,10 +480,11 @@
   function deleteSelectedFurniture(toolbar) {
     if (state.selectedWall) {
       const wall = state.selectedWall;
-      if (!isEditableWall(wall)) {
-        updateSafetyState("구조벽은 삭제할 수 없습니다.");
+      if (!isDeletableWall(wall)) {
+        updateSafetyState("200mm를 초과하는 구조벽은 삭제할 수 없습니다.");
         return;
       }
+      eraseWallRegionFromOverlay(wall);
       if (wall.parent) wall.parent.remove(wall);
       disposeObject3D(wall);
       state.wallObjects = state.wallObjects.filter((m) => m !== wall);
@@ -1014,11 +1017,13 @@
       toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: point.y * scale - planeH / 2 }),
     };
 
-    addWallsToGroup(group, planData, imageTransform);
+    addWallMaskOverlay(group, planData, planeW, planeH);
+    addEditableWallRegionsToGroup(group, planData, imageTransform);
     state.scene.add(group);
     state.floorPlanGroup = group;
     setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
-    state.imageWallMask = null;
+    state.wallRenderRects = normalizeWallRenderRects(planData.wall_render_rects);
+    loadWallCollisionMaskFromPlan(planData);
     const usedExtractedFootprint = loadExtractedFloorFootprintFromPlan(planData, attrs);
     if (!usedExtractedFootprint) {
       const usedExtractedRooms = loadExtractedRoomsFromPlan(planData, attrs);
@@ -1631,7 +1636,91 @@
     classifyWallsByThickness();
   }
 
-  function addWallToGroup(group, wall, transform) {
+  function addEditableWallRegionsToGroup(group, planData, transform) {
+    const regions = Array.isArray(planData.editable_wall_regions) ? planData.editable_wall_regions : [];
+    regions.forEach((wall) => addWallToGroup(group, wall, transform, { hitOnly: true }));
+    classifyWallsByThickness();
+  }
+
+  function addWallMaskOverlay(group, planData, planeW, planeH) {
+    const dataUri = getLayerDataUri(planData, "wall_transparent") || getLayerDataUri(planData, "wall_mask");
+    if (!dataUri) return;
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.needsUpdate = true;
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(planeW, planeH),
+        new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide })
+      );
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(0, 0.018, 0);
+      mesh.renderOrder = 2;
+      mesh.userData.type = "wallOverlay";
+      group.add(mesh);
+      state.wallOverlay = { mesh, canvas, ctx, texture };
+    };
+    img.src = dataUri;
+  }
+
+  function getLayerDataUri(planData, key) {
+    const value = planData && planData.layers && planData.layers[key];
+    return typeof value === "string" && value.indexOf("data:image") === 0 ? value : null;
+  }
+
+  function loadWallCollisionMaskFromPlan(planData) {
+    const dataUri = getLayerDataUri(planData, "wall_mask");
+    state.imageWallMask = null;
+    if (!dataUri) return;
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, width, height).data;
+      const mask = new Uint8Array(width * height);
+      for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+        if (data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0) mask[p] = 1;
+      }
+      state.imageWallMask = {
+        width,
+        height,
+        mask,
+        integral: buildMaskIntegral(mask, width, height),
+      };
+      updateSafetyState();
+    };
+    img.src = dataUri;
+  }
+
+  function normalizeWallRenderRects(rectData) {
+    if (!rectData || !Array.isArray(rectData.rects)) return null;
+    const width = Number(rectData.width);
+    const height = Number(rectData.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+    const rects = rectData.rects
+      .map((rect) => Array.isArray(rect)
+        ? { x: Number(rect[0]), y: Number(rect[1]), width: Number(rect[2]), height: Number(rect[3]) }
+        : { x: Number(rect.x), y: Number(rect.y), width: Number(rect.width), height: Number(rect.height) })
+      .filter((rect) => Number.isFinite(rect.x)
+        && Number.isFinite(rect.y)
+        && Number.isFinite(rect.width)
+        && Number.isFinite(rect.height)
+        && rect.width > 0
+        && rect.height > 0);
+    return rects.length ? { width, height, rects } : null;
+  }
+
+  function addWallToGroup(group, wall, transform, options) {
     const { x1, y1, x2, y2 } = wall || {};
     if ([x1, y1, x2, y2].some((v) => typeof v !== "number")) return;
     const start = transform.toScenePoint({ x: x1, y: y1 });
@@ -1646,7 +1735,10 @@
       id: wall.id || `wall_${state.wallObjects.length}`,
       label: wall.id || "벽",
       editable: wall.editable !== false,
+      deletable: wall.deletable !== false,
+      movable: wall.movable !== false,
       source: wall,
+      hitOnly: options && options.hitOnly,
     });
     group.add(mesh);
     state.wallObjects.push(mesh);
@@ -1656,9 +1748,12 @@
     const dx = end.x - start.x;
     const dz = end.z - start.z;
     const length = Math.sqrt(dx * dx + dz * dz);
+    const material = meta.hitOnly
+      ? new THREE.MeshBasicMaterial({ color: 0xf59e0b, transparent: true, opacity: 0.02, depthWrite: false })
+      : new THREE.MeshStandardMaterial({ color: DEFAULT_WALL_COLOR, roughness: 0.78 });
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(length, 0.055, thickness),
-      new THREE.MeshStandardMaterial({ color: DEFAULT_WALL_COLOR, roughness: 0.78 })
+      material
     );
     mesh.position.set((start.x + end.x) * 0.5, 0.032, (start.z + end.z) * 0.5);
     mesh.rotation.y = -Math.atan2(dz, dx);
@@ -1670,10 +1765,14 @@
       editable: meta.editable,
       locked: meta.locked || false,
       wallRole: meta.wallRole || "partition",
+      deletable: meta.deletable !== false,
+      movable: meta.movable !== false,
+      thicknessM: thickness,
       source: meta.source,
       renderHeight: height,
       wallMaterial: state.activeWallMaterial,
       wallpaperApplied: false,
+      hitOnly: Boolean(meta.hitOnly),
     };
     mesh.castShadow = false;
     mesh.receiveShadow = true;
@@ -1688,13 +1787,79 @@
       const structural = thickness > PARTITION_WALL_MAX_THICKNESS_M;
       wall.userData.wallRole = structural ? "structural" : "partition";
       wall.userData.locked = structural;
-      wall.userData.editable = !structural && wall.userData.editable !== false;
+      wall.userData.deletable = !structural && wall.userData.editable !== false;
+      wall.userData.movable = !wall.userData.source && !structural && wall.userData.editable !== false;
+      wall.userData.editable = wall.userData.deletable;
       if (wall.material) wall.material.color.setHex(DEFAULT_WALL_COLOR);
     });
   }
 
   function isEditableWall(wall) {
-    return Boolean(wall && wall.userData && wall.userData.editable !== false && !wall.userData.locked);
+    return isDeletableWall(wall);
+  }
+
+  function isDeletableWall(wall) {
+    return Boolean(wall && wall.userData && wall.userData.deletable !== false && wall.userData.editable !== false && !wall.userData.locked);
+  }
+
+  function isMovableWall(wall) {
+    return Boolean(wall && wall.userData && wall.userData.movable !== false && wall.userData.editable !== false && !wall.userData.locked);
+  }
+
+  function eraseWallRegionFromOverlay(wall) {
+    const overlay = state.wallOverlay;
+    const source = wall && wall.userData && wall.userData.source;
+    const bbox = source && source.bbox;
+    if (!overlay || !source || !bbox || typeof source.mask !== "string") return;
+
+    const img = new Image();
+    img.onload = () => {
+      const x = Math.max(0, Number(bbox.x) || 0);
+      const y = Math.max(0, Number(bbox.y) || 0);
+      const width = Math.min(Number(bbox.width) || img.width, overlay.canvas.width - x);
+      const height = Math.min(Number(bbox.height) || img.height, overlay.canvas.height - y);
+      if (width <= 0 || height <= 0) return;
+
+      const maskCanvas = document.createElement("canvas");
+      maskCanvas.width = width;
+      maskCanvas.height = height;
+      const maskCtx = maskCanvas.getContext("2d", { willReadFrequently: true });
+      maskCtx.drawImage(img, 0, 0, width, height);
+      const maskData = maskCtx.getImageData(0, 0, width, height).data;
+      const overlayData = overlay.ctx.getImageData(x, y, width, height);
+      const pixels = overlayData.data;
+
+      for (let i = 0; i < maskData.length; i += 4) {
+        if (maskData[i] <= 0) continue;
+        pixels[i] = 0;
+        pixels[i + 1] = 0;
+        pixels[i + 2] = 0;
+        pixels[i + 3] = 0;
+      }
+
+      overlay.ctx.putImageData(overlayData, x, y);
+      overlay.texture.needsUpdate = true;
+      eraseWallRegionFromCollisionMask(x, y, width, height, maskData);
+    };
+    img.src = source.mask;
+  }
+
+  function eraseWallRegionFromCollisionMask(x, y, width, height, maskData) {
+    const wallMask = state.imageWallMask;
+    if (!wallMask) return;
+    for (let py = 0; py < height; py += 1) {
+      const destY = y + py;
+      if (destY < 0 || destY >= wallMask.height) continue;
+      for (let px = 0; px < width; px += 1) {
+        const destX = x + px;
+        if (destX < 0 || destX >= wallMask.width) continue;
+        const maskIndex = (py * width + px) * 4;
+        if (maskData[maskIndex] <= 0) continue;
+        wallMask.mask[destY * wallMask.width + destX] = 0;
+      }
+    }
+    wallMask.integral = buildMaskIntegral(wallMask.mask, wallMask.width, wallMask.height);
+    state.wallRenderRects = null;
   }
 
   function firstNumber(...values) {
@@ -1745,6 +1910,8 @@
     state.floorPlanGroup = null;
     state.imageFloorMask = null;
     state.imageWallMask = null;
+    state.wallOverlay = null;
+    state.wallRenderRects = null;
     state.floorLockedToPlan = false;
     state.wallObjects = [];
     state.floorObjects = [];
@@ -2916,6 +3083,14 @@
   }
 
   function addRenderedWalls(group) {
+    if (state.imageWallMask && state.floorBounds) {
+      const renderedMask = createRenderedWallMaskMesh(state.imageWallMask, state.floorBounds, state.wallRenderRects);
+      if (renderedMask) {
+        group.add(renderedMask);
+        return;
+      }
+    }
+
     state.wallObjects.forEach((wall) => {
       const params = wall.geometry && wall.geometry.parameters;
       if (!params) return;
@@ -2925,6 +3100,109 @@
       rendered.quaternion.copy(wall.quaternion);
       group.add(rendered);
     });
+  }
+
+  function createRenderedWallMaskMesh(maskData, bounds, rectData) {
+    const mask = maskData.mask;
+    const width = maskData.width;
+    const height = maskData.height;
+    if (!mask || !width || !height) return null;
+
+    const wallHeight = 2.4 * RENDERED_WALL_HEIGHT_RATIO;
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const groups = [];
+    const cellW = bounds.width / width;
+    const cellD = bounds.depth / height;
+
+    if (rectData && rectData.width === width && rectData.height === height) {
+      rectData.rects.forEach((rect) => {
+        addBoxToGeometryBuffers(
+          positions,
+          normals,
+          indices,
+          groups,
+          bounds.minX + rect.x * cellW,
+          bounds.minX + (rect.x + rect.width) * cellW,
+          0,
+          wallHeight,
+          bounds.minZ + rect.y * cellD,
+          bounds.minZ + (rect.y + rect.height) * cellD
+        );
+      });
+    } else {
+      for (let y = 0; y < height; y += 1) {
+        let x = 0;
+        while (x < width) {
+          while (x < width && !mask[y * width + x]) x += 1;
+          if (x >= width) break;
+          const startX = x;
+          while (x < width && mask[y * width + x]) x += 1;
+          const endX = x;
+          addBoxToGeometryBuffers(
+            positions,
+            normals,
+            indices,
+            groups,
+            bounds.minX + startX * cellW,
+            bounds.minX + endX * cellW,
+            0,
+            wallHeight,
+            bounds.minZ + y * cellD,
+            bounds.minZ + (y + 1) * cellD
+          );
+        }
+      }
+    }
+
+    if (positions.length === 0) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setIndex(indices);
+    groups.forEach((group) => geometry.addGroup(group.start, group.count, group.materialIndex));
+    geometry.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geometry, [
+      createWallCoreMaterial(),
+      createWallSideMaterial(state.activeWallMaterial),
+    ]);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData.type = "renderedWallMask";
+    return mesh;
+  }
+
+  function addBoxToGeometryBuffers(positions, normals, indices, groups, minX, maxX, minY, maxY, minZ, maxZ) {
+    addFace(positions, normals, indices, [
+      [maxX, minY, minZ], [maxX, maxY, minZ], [maxX, maxY, maxZ], [maxX, minY, maxZ],
+    ], [1, 0, 0], groups, 1);
+    addFace(positions, normals, indices, [
+      [minX, minY, maxZ], [minX, maxY, maxZ], [minX, maxY, minZ], [minX, minY, minZ],
+    ], [-1, 0, 0], groups, 1);
+    addFace(positions, normals, indices, [
+      [minX, maxY, maxZ], [maxX, maxY, maxZ], [maxX, maxY, minZ], [minX, maxY, minZ],
+    ], [0, 1, 0], groups, 0);
+    addFace(positions, normals, indices, [
+      [minX, minY, minZ], [maxX, minY, minZ], [maxX, minY, maxZ], [minX, minY, maxZ],
+    ], [0, -1, 0], groups, 0);
+    addFace(positions, normals, indices, [
+      [minX, minY, maxZ], [maxX, minY, maxZ], [maxX, maxY, maxZ], [minX, maxY, maxZ],
+    ], [0, 0, 1], groups, 1);
+    addFace(positions, normals, indices, [
+      [maxX, minY, minZ], [minX, minY, minZ], [minX, maxY, minZ], [maxX, maxY, minZ],
+    ], [0, 0, -1], groups, 1);
+  }
+
+  function addFace(positions, normals, indices, corners, normal, groups, materialIndex) {
+    const base = positions.length / 3;
+    const indexStart = indices.length;
+    corners.forEach((corner) => {
+      positions.push(corner[0], corner[1], corner[2]);
+      normals.push(normal[0], normal[1], normal[2]);
+    });
+    indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    groups.push({ start: indexStart, count: 6, materialIndex });
   }
 
   function calculateLayoutBounds() {

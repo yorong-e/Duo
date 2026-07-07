@@ -31,6 +31,8 @@ from floorplan_vectorizer import vectorize
 
 
 DEFAULT_WALL_HEIGHT_MM = 2400
+FLOOR_PLAN_PIXEL_MM = 10
+PARTITION_WALL_MAX_MM = 200
 ROOM_MIN_AREA_RATIO = 0.0012
 ROOM_STRUCT_THRESH = 130
 ROOM_SEAL_MIN_KERNEL = 17
@@ -59,6 +61,16 @@ def rgba_from_mask(img, mask):
     dilated = cv2.dilate(mask, np.ones((3, 3), np.uint8))
     b, g, r = cv2.split(img)
     return cv2.merge([b, g, r, dilated])
+
+
+def raw_mask_overlay(img, wall_mask, floor_mask):
+    """벽/바닥 마스크를 보정 없이 그대로 원본 평면도 위에 겹친 검증용 이미지.
+    (벡터화/스냅 등 후보정 결과는 절대 반영하지 않음 — extract_walls 마스크 원본만 사용)"""
+    overlay = img.copy()
+    overlay[wall_mask > 0] = (0, 0, 255)
+    blue = overlay.copy()
+    blue[floor_mask > 0] = (255, 100, 0)
+    return cv2.addWeighted(overlay, 0.58, blue, 0.42, 0)
 
 
 def wall_bounded_interior_mask(wall_mask, wall_thickness):
@@ -244,6 +256,100 @@ def segment_to_wall(index, segment):
     }
 
 
+def editable_wall_regions_from_segments(segments, wall_mask):
+    """200mm 이하 벽만 삭제 대상으로 내려주기 위한 마스크 조각 생성."""
+    max_thickness_px = PARTITION_WALL_MAX_MM / FLOOR_PLAN_PIXEL_MM
+    h, w = wall_mask.shape
+    regions = []
+    for x1, y1, x2, y2, thickness in sorted(
+            segments, key=lambda s: -math.hypot(s[2] - s[0], s[3] - s[1])):
+        if thickness > max_thickness_px:
+            continue
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < 4:
+            continue
+
+        mask = np.zeros((h, w), np.uint8)
+        cv2.line(
+            mask,
+            (int(round(x1)), int(round(y1))),
+            (int(round(x2)), int(round(y2))),
+            255,
+            max(int(round(thickness)), 1),
+        )
+        mask = cv2.bitwise_and(mask, wall_mask)
+        ys, xs = np.where(mask > 0)
+        if xs.size == 0:
+            continue
+
+        pad = max(int(math.ceil(thickness)) + 2, 4)
+        min_x = max(int(xs.min()) - pad, 0)
+        max_x = min(int(xs.max()) + pad + 1, w)
+        min_y = max(int(ys.min()) - pad, 0)
+        max_y = min(int(ys.max()) + pad + 1, h)
+        crop = mask[min_y:max_y, min_x:max_x]
+        wall = segment_to_wall(len(regions), (x1, y1, x2, y2, thickness))
+        wall.update({
+            "id": f"editable_wall_{len(regions):04d}",
+            "editable": True,
+            "locked": False,
+            "movable": False,
+            "deletable": True,
+            "source": "partition_wall_region",
+            "thickness_mm": round(float(thickness * FLOOR_PLAN_PIXEL_MM), 1),
+            "bbox": {
+                "x": min_x,
+                "y": min_y,
+                "width": max_x - min_x,
+                "height": max_y - min_y,
+            },
+            "mask": encode_png_data_uri(crop),
+            "handles": ["delete"],
+        })
+        regions.append(wall)
+    return regions
+
+
+def wall_render_rects_from_mask(wall_mask):
+    """3D 렌더용 벽 마스크 run을 서버에서 미리 직사각형으로 압축한다."""
+    h, w = wall_mask.shape
+    active = {}
+    rects = []
+
+    for y in range(h):
+        row = wall_mask[y] > 0
+        next_active = {}
+        x = 0
+        while x < w:
+            while x < w and not row[x]:
+                x += 1
+            if x >= w:
+                break
+            start_x = x
+            while x < w and row[x]:
+                x += 1
+            end_x = x
+            key = (start_x, end_x)
+            if key in active:
+                rect = active[key]
+                rect[3] += 1
+            else:
+                rect = [start_x, y, end_x - start_x, 1]
+            next_active[key] = rect
+
+        for key, rect in active.items():
+            if key not in next_active:
+                rects.append(rect)
+        active = next_active
+
+    rects.extend(active.values())
+    return {
+        "width": int(w),
+        "height": int(h),
+        "rects": rects,
+    }
+
+
 def build_editable_payload(input_path, output_path=None, debug_dir=None):
     img, src_json = extract_layers.load_image_from_json(str(input_path))
     height, width = img.shape[:2]
@@ -258,6 +364,8 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         segment_to_wall(i, seg)
         for i, seg in enumerate(sorted(segments, key=lambda s: -math.hypot(s[2] - s[0], s[3] - s[1])))
     ]
+    editable_wall_regions = editable_wall_regions_from_segments(segments, wall_mask)
+    wall_render_rects = wall_render_rects_from_mask(wall_mask)
     floors = components_to_polygons(floor_mask, extract_layers.FLOOR_MIN_AREA)
     room_masks = []
     rooms = []
@@ -273,6 +381,8 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         "href": encode_png_data_uri(floor_only),
     }
     payload["walls"] = walls
+    payload["editable_wall_regions"] = editable_wall_regions
+    payload["wall_render_rects"] = wall_render_rects
     payload["floors"] = floors
     payload["rooms"] = rooms
     payload["layers"] = {
@@ -283,6 +393,7 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         "floor_source": "extract_plan_footprint_mask",
         "room_source": None,
         "wall_count": len(walls),
+        "editable_wall_count": len(editable_wall_regions),
         "floor_count": len(floors),
         "room_count": len(rooms),
         "estimated_wall_thickness_px": round(float(thickness), 1),
@@ -290,6 +401,7 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         "floor_mask": encode_png_data_uri(floor_mask),
         "wall_transparent": encode_png_data_uri(rgba_from_mask(img, wall_mask)),
         "floor_transparent": encode_png_data_uri(cv2.merge([*cv2.split(img), floor_alpha])),
+        "wall_overlay": encode_png_data_uri(raw_mask_overlay(img, wall_mask, floor_mask)),
     }
 
     if debug_dir:
@@ -306,20 +418,8 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
             room_vis[room_mask > 0] = palette[i % len(palette)]
         room_vis[wall_mask > 0] = (70, 80, 95)
         cv2.imwrite(str(Path(debug_dir) / "rooms_mask.png"), room_vis)
-        overlay = img.copy()
-        overlay[wall_mask > 0] = (0, 0, 255)
-        blue = overlay.copy()
-        blue[floor_mask > 0] = (255, 100, 0)
-        overlay = cv2.addWeighted(overlay, 0.58, blue, 0.42, 0)
-        for wall in walls:
-            cv2.line(
-                overlay,
-                (wall["x1"], wall["y1"]),
-                (wall["x2"], wall["y2"]),
-                (0, 255, 255),
-                max(int(wall["thickness_px"] // 2), 3),
-            )
-        cv2.imwrite(str(Path(debug_dir) / "editable_overlay.png"), overlay)
+        cv2.imwrite(str(Path(debug_dir) / "editable_overlay.png"),
+                    raw_mask_overlay(img, wall_mask, floor_mask))
 
     if output_path:
         with Path(output_path).open("w", encoding="utf-8") as f:

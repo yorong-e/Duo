@@ -49,6 +49,11 @@ public class FurnitureService {
             return loadFallbackCatalog();
         }
 
+        List<FurnitureItem> furnitureItems = loadFurnitureTable(jdbcTemplate);
+        if (!furnitureItems.isEmpty()) {
+            return furnitureItems;
+        }
+
         try {
             List<FurnitureItem> items = jdbcTemplate.query("""
                     SELECT sku_id, product_name, category, width_mm, depth_mm, height_mm,
@@ -62,22 +67,26 @@ public class FurnitureService {
             log.warn("furniture_sku table returned no active rows; using fallback catalog");
             return loadFallbackCatalog();
         } catch (DataAccessException ex) {
-            log.warn("Could not load furniture_sku from database; trying legacy furniture table: {}", ex.getMessage());
-            try {
-                List<FurnitureItem> legacyItems = jdbcTemplate.query("""
-                        SELECT category, image_url, name, size_description, color, price,
-                               product_url, width_cm, depth_cm, height_cm, glb_model_url
-                        FROM furniture
-                        """, (rs, rowNum) -> mapFurnitureRow(rs, rowNum));
-                if (!legacyItems.isEmpty()) {
-                    return legacyItems;
-                }
-                log.warn("Legacy furniture table returned no rows; using fallback catalog");
-                return loadFallbackCatalog();
-            } catch (DataAccessException colorOnlyEx) {
-                log.warn("Could not load legacy furniture table; using fallback catalog: {}", colorOnlyEx.getMessage());
-                return loadFallbackCatalog();
+            log.warn("Could not load furniture_sku from database; using fallback catalog: {}", ex.getMessage());
+            return loadFallbackCatalog();
+        }
+    }
+
+    private List<FurnitureItem> loadFurnitureTable(JdbcTemplate jdbcTemplate) {
+        try {
+            List<FurnitureItem> items = jdbcTemplate.query("""
+                    SELECT category, image_url, name, size_description, color, price,
+                           product_url, width_cm, depth_cm, height_cm
+                    FROM furniture
+                    ORDER BY category, name
+                    """, (rs, rowNum) -> mapFurnitureRow(rs, rowNum));
+            if (items.isEmpty()) {
+                log.warn("furniture table returned no rows; trying furniture_sku");
             }
+            return items;
+        } catch (DataAccessException ex) {
+            log.warn("Could not load furniture table; trying furniture_sku: {}", ex.getMessage());
+            return List.of();
         }
     }
 
@@ -106,7 +115,6 @@ public class FurnitureService {
     private FurnitureItem mapFurnitureRow(ResultSet rs, int rowNum) throws SQLException {
         String category = rs.getString("category");
         String color = normalizeColor(rs.getString("color"));
-        String modelPath = rs.getString("glb_model_url");
         return new FurnitureItem(
                 "db-" + (rowNum + 1),
                 rs.getString("name"),
@@ -114,8 +122,8 @@ public class FurnitureService {
                 rs.getString("price"),
                 rs.getString("size_description"),
                 color,
-                normalizeModelPath(modelPath, category, color),
-                rs.getString("image_url"),
+                "",
+                normalizeImageUrl(rs.getString("image_url")),
                 rs.getString("product_url"),
                 rs.getDouble("width_cm"),
                 rs.getDouble("depth_cm"),
@@ -267,6 +275,17 @@ public class FurnitureService {
         }
 
         return "/static/models/sofa/" + normalizedColor + "_sofa.glb";
+    }
+
+    private String normalizeImageUrl(String imageUrl) {
+        if (imageUrl == null || imageUrl.isBlank()) {
+            return "";
+        }
+        String trimmed = imageUrl.trim();
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("data:image")) {
+            return trimmed;
+        }
+        return trimmed.startsWith("/") ? trimmed : "/" + trimmed;
     }
 
     private String normalizeColor(String color) {

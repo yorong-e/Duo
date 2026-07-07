@@ -397,9 +397,13 @@ main {
 #furniture-list {
   display: grid;
   gap: 10px;
-  min-height: 0;
+  flex: 1 1 420px;
+  max-height: calc(100vh - 430px);
+  min-height: 360px;
   overflow-y: auto;
   padding-right: 4px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .furniture-card {
@@ -588,6 +592,12 @@ main {
     border-bottom: 1px solid var(--gray-200);
     border-right: 0;
     order: 1;
+  }
+
+  #furniture-list {
+    flex: 0 0 auto;
+    max-height: 520px;
+    min-height: 320px;
   }
 
   #canvas-container {

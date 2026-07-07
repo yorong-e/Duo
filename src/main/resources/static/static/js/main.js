@@ -145,6 +145,7 @@
     pendingWallStart: null,
     wallPreview: null,
     catalogItems: [],
+    floorMaterials: [],
     activeColor: "all",
     activeCatalogSection: "furniture",
     activeFurnitureCategory: "all",
@@ -173,6 +174,7 @@
     renderFloorMaterials();
     renderWallMaterials();
     loadCatalog();
+    loadFloorMaterials();
     window.addEventListener("resize", onWindowResize);
     window.addEventListener("keydown", onKeyDown);
     animate();
@@ -1555,17 +1557,13 @@
     canvas.height = roomData.height;
     const ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
-    const patternTexture = createFloorPatternCanvas(getFloorMaterialByValue(room.floorMaterial), canvas.width, canvas.height);
-    ctx.drawImage(patternTexture, 0, 0);
-    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    for (let i = 3, p = 0; i < image.data.length; i += 4, p += 1) {
-      image.data[i] = room.mask[p] ? 255 : 0;
-    }
-    ctx.putImageData(image, 0, 0);
+    const floorMaterial = getFloorMaterialByValue(room.floorMaterial);
+    drawMaskedFloorCanvas(ctx, canvas, room.mask, floorMaterial, null, roomData);
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.ClampToEdgeWrapping;
     texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.needsUpdate = true;
+    loadFloorImageIntoMaskedCanvas(ctx, canvas, room.mask, floorMaterial, texture, roomData);
     return new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: texture,
@@ -1573,6 +1571,80 @@
       roughness: 0.82,
       side: THREE.DoubleSide,
     });
+  }
+
+  function drawMaskedFloorCanvas(ctx, canvas, mask, material, sourceImage, roomData) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (sourceImage) {
+      const tile = createFloorImageTile(sourceImage, material, roomData, canvas);
+      const pattern = ctx.createPattern(tile, "repeat");
+      if (pattern) {
+        ctx.fillStyle = pattern;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+    } else {
+      const patternTexture = createFloorPatternCanvas(material, canvas.width, canvas.height);
+      ctx.drawImage(patternTexture, 0, 0);
+    }
+    applyRoomMaskAlpha(ctx, canvas, mask);
+  }
+
+  function createFloorImageTile(sourceImage, material, roomData, canvas) {
+    const bounds = (roomData && roomData.bounds) || state.floorBounds || { width: 1, depth: 1 };
+    const pxPerMeterX = canvas.width / Math.max(bounds.width, 0.001);
+    const pxPerMeterY = canvas.height / Math.max(bounds.depth, 0.001);
+    const tileW = clamp(Math.round((material.widthMm || 180) * MM_TO_SCENE * pxPerMeterX), 12, 180);
+    const tileH = clamp(Math.round((material.lengthM || 1.2) * pxPerMeterY), tileW, 420);
+    const tile = document.createElement("canvas");
+    tile.width = tileW;
+    tile.height = tileH;
+    const tileCtx = tile.getContext("2d");
+    tileCtx.imageSmoothingEnabled = true;
+    tileCtx.drawImage(sourceImage, 0, 0, tileW, tileH);
+    return tile;
+  }
+
+  function loadFloorImageIntoMaskedCanvas(ctx, canvas, mask, material, texture, roomData) {
+    if (!material || !material.imageUrl) return;
+    if (!canUseImageInCanvas(material.imageUrl)) {
+      console.warn("바닥재 이미지가 외부 URL이라 캔버스 텍스처 적용을 건너뜁니다:", material.imageUrl);
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      drawMaskedFloorCanvas(ctx, canvas, mask, material, img, roomData);
+      texture.needsUpdate = true;
+    };
+    img.onerror = () => {
+      console.warn("바닥재 이미지를 불러오지 못했습니다:", material.imageUrl);
+      texture.needsUpdate = true;
+    };
+    img.src = material.imageUrl;
+  }
+
+  function canUseImageInCanvas(url) {
+    try {
+      const parsed = new URL(url, window.location.href);
+      return parsed.origin === window.location.origin;
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  function applyRoomMaskAlpha(ctx, canvas, mask) {
+    const maskCanvas = document.createElement("canvas");
+    maskCanvas.width = canvas.width;
+    maskCanvas.height = canvas.height;
+    const maskCtx = maskCanvas.getContext("2d");
+    const maskImage = maskCtx.createImageData(canvas.width, canvas.height);
+    for (let i = 3, p = 0; i < maskImage.data.length; i += 4, p += 1) {
+      maskImage.data[i] = mask[p] ? 255 : 0;
+    }
+    maskCtx.putImageData(maskImage, 0, 0);
+    ctx.save();
+    ctx.globalCompositeOperation = "destination-in";
+    ctx.drawImage(maskCanvas, 0, 0);
+    ctx.restore();
   }
 
   function buildMaskFromRooms(roomData) {
@@ -1940,6 +2012,46 @@
     }
   }
 
+  async function loadFloorMaterials() {
+    try {
+      const res = await fetch("/api/floors");
+      if (!res.ok) throw new Error("바닥재 API 요청 실패");
+      const items = await res.json();
+      state.floorMaterials = items.map(mapFloorMaterialItem).filter(Boolean);
+      if (state.floorMaterials.length > 0 && !state.floorMaterials.some((item) => item.value === state.activeFloorMaterial)) {
+        state.activeFloorMaterial = state.floorMaterials[0].value;
+      }
+      renderFloorMaterials();
+      renderCatalog();
+      refreshRoomFloorMaterials(state.roomObjects);
+    } catch (err) {
+      console.warn("바닥재 데이터를 불러오지 못했습니다. 기본 패턴을 사용합니다.", err);
+      state.floorMaterials = [];
+      renderFloorMaterials();
+    }
+  }
+
+  function mapFloorMaterialItem(item, index) {
+    const productCode = String(item.productCode || item.product_code || "").trim();
+    const name = String(item.name || productCode || "바닥재").trim();
+    const value = productCode || `floor-${index + 1}`;
+    const imageUrl = item.imageUrl || item.image_url || "";
+    return {
+      value,
+      label: name,
+      productCode,
+      series: item.series || "",
+      thicknessMm: Number(item.thicknessMm || item.thickness_mm) || 0,
+      widthMm: Number(item.widthMm || item.width_mm) || 0,
+      lengthM: Number(item.lengthM || item.length_m) || 0,
+      imageUrl,
+      detailUrl: item.detailUrl || item.detail_url || "",
+      price: item.price || "",
+      color: 0xb98f66,
+      swatch: imageUrl ? `url("${imageUrl}") center / cover` : "linear-gradient(90deg, #b6815c, #6f432f)",
+    };
+  }
+
   function renderCatalogTabs() {
     const el = document.getElementById("catalog-tabs");
     if (!el) return;
@@ -2030,7 +2142,7 @@
     const label = document.getElementById("floor-material-name");
     if (!el) return;
     el.innerHTML = "";
-    FLOOR_MATERIALS.forEach((material) => {
+    getFloorMaterials().forEach((material) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "material-btn" + (state.activeFloorMaterial === material.value ? " active" : "");
@@ -2070,11 +2182,15 @@
   }
 
   function getActiveFloorMaterial() {
-    return FLOOR_MATERIALS.find((material) => material.value === state.activeFloorMaterial) || FLOOR_MATERIALS[0];
+    return getFloorMaterials().find((material) => material.value === state.activeFloorMaterial) || getFloorMaterials()[0];
   }
 
   function getFloorMaterialByValue(value) {
-    return FLOOR_MATERIALS.find((material) => material.value === value) || getActiveFloorMaterial();
+    return getFloorMaterials().find((material) => material.value === value) || getActiveFloorMaterial();
+  }
+
+  function getFloorMaterials() {
+    return state.floorMaterials.length > 0 ? state.floorMaterials : FLOOR_MATERIALS;
   }
 
   function getActiveWallMaterial() {
@@ -2097,6 +2213,15 @@
   }
 
   function createFloorTexture(material) {
+    if (material.imageUrl) {
+      const texture = textureLoader.load(material.imageUrl);
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      const repeatX = material.widthMm > 0 ? Math.max(2, Math.round(2400 / material.widthMm)) : 6;
+      const repeatY = material.lengthM > 0 ? Math.max(1, Math.round(6 / material.lengthM)) : 6;
+      texture.repeat.set(repeatX, repeatY);
+      return texture;
+    }
     const canvas = createFloorPatternCanvas(material, 256, 256);
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.RepeatWrapping;
@@ -2205,6 +2330,7 @@
       }, {
         width: room.userData.maskWidth,
         height: room.userData.maskHeight,
+        bounds: state.floorBounds,
       });
       if (room.material) {
         if (room.material.map) room.material.map.dispose();
@@ -2333,7 +2459,7 @@
     const countEl = document.getElementById("catalog-count");
     if (!listEl) return;
     if (state.activeCatalogSection !== "furniture") {
-      if (countEl) countEl.textContent = state.activeCatalogSection === "floor" ? `${FLOOR_MATERIALS.length} finishes` : `${WALL_MATERIALS.length} finishes`;
+      if (countEl) countEl.textContent = state.activeCatalogSection === "floor" ? `${getFloorMaterials().length} finishes` : `${WALL_MATERIALS.length} finishes`;
       return;
     }
     const items = getFilteredCatalogItems();
@@ -2451,7 +2577,8 @@
   }
 
   async function createGLBFurniturePivot(item) {
-    const paths = [item.model_path, item.modelPath, resolveModelPath(item), "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"].filter(Boolean);
+    const explicitPath = item.model_path || item.modelPath;
+    const paths = [explicitPath, resolveModelPath(item), "/static/models/sofa/gray_sofa.glb"].filter(Boolean);
     const gltf = await loadGltfWithFallback(paths);
     if (!gltf) return null;
 
@@ -3038,9 +3165,12 @@
 
   async function addRenderedFurnitureModel(group, planModel) {
     const item = exportCatalogLikeItem(planModel);
-    const paths = [item.model_path, "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"].filter(Boolean);
+    const paths = [item.model_path, resolveModelPath(item), "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"].filter(Boolean);
     const gltf = await loadGltfWithFallback(paths);
-    if (!gltf) return;
+    if (!gltf) {
+      group.add(createRenderedFurnitureBox(planModel, item));
+      return;
+    }
 
     const model = gltf.scene;
     const box = new THREE.Box3().setFromObject(model);
@@ -3054,6 +3184,21 @@
     pivot.position.set(planModel.position.x, pivot.userData.centerY || 0, planModel.position.z);
     pivot.rotation.y = planModel.rotation.y;
     group.add(pivot);
+  }
+
+  function createRenderedFurnitureBox(planModel, item) {
+    const width = Math.max((Number(item.width) || 150) * 0.01, 0.18);
+    const height = Math.max((Number(item.height) || 80) * 0.01, 0.18);
+    const depth = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(width, height, depth),
+      new THREE.MeshStandardMaterial({ color: furnitureColorHex(item.color), roughness: 0.76 })
+    );
+    mesh.position.set(planModel.position.x, height / 2, planModel.position.z);
+    mesh.rotation.y = planModel.rotation.y;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
   }
 
   function loadGltfWithFallback(paths, index) {
@@ -3511,11 +3656,34 @@
   function resolveModelPath(item) {
     const color = normalizeColor(item.color);
     const category = String(item.category || "").toLowerCase();
+    const name = String(item.product_name || item.name || "").toLowerCase();
+    const text = `${category} ${name}`;
+    if (text.includes("toilet") || text.includes("변기") || text.includes("양변기")) {
+      return "/static/models/Default/toilet.glb";
+    }
+    if (text.includes("sink") || text.includes("싱크") || text.includes("세면") || text.includes("수전")) {
+      return text.includes("kitchen") || text.includes("주방")
+        ? "/static/models/Default/kitchen_sink.glb"
+        : "/static/models/Default/sink.glb";
+    }
+    if (text.includes("table") || text.includes("desk") || text.includes("테이블") || text.includes("책상")) {
+      return "/static/models/table/wooden_table.glb";
+    }
+    if (text.includes("gaming") || text.includes("게이밍")) {
+      return color === "white"
+        ? "/static/models/gaming_chair/gaming_white_chair.glb"
+        : "/static/models/gaming_chair/gaming_black_chair.glb";
+    }
+    if (text.includes("chair") || text.includes("의자")) {
+      return color === "gray"
+        ? "/static/models/dining_chair/dining_grey_chair.glb"
+        : "/static/models/gaming_chair/gaming_black_chair.glb";
+    }
     if (category.includes("bed") || category.includes("침대")) {
       const size = color === "black" || color === "white" ? "single" : "queen";
       return `/static/models/bed/${size}_${color}_bed.glb`;
     }
-    if (color === "blue") return "/static/models/curve_sofa/blue_curve_sofa.glb";
+    if (text.includes("curve") || text.includes("커브") || color === "blue") return `/static/models/curve_sofa/${color}_curve_sofa.glb`;
     return `/static/models/sofa/${color}_sofa.glb`;
   }
 

@@ -40,8 +40,6 @@ public class FloorplanService {
         Path tempDir = Files.createTempDirectory("duo-floorplan-");
         Path input = tempDir.resolve(safeName(file.getOriginalFilename(), "floorplan.json"));
         Path output = tempDir.resolve("editable-floorplan.json");
-        Path debugDir = tempDir.resolve("debug");
-
         file.transferTo(input);
 
         List<String> command = new ArrayList<>();
@@ -51,8 +49,6 @@ public class FloorplanService {
         command.add(input.toString());
         command.add("-o");
         command.add(output.toString());
-        command.add("--debug-dir");
-        command.add(debugDir.toString());
 
         Process process;
         try {

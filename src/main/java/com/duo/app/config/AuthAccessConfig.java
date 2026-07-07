@@ -16,7 +16,7 @@ public class AuthAccessConfig implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new LoginRequiredInterceptor())
-                .addPathPatterns("/", "/index.html", "/api/furniture/**", "/api/floorplans/**");
+                .addPathPatterns("/", "/index.html", "/api/floorplans/**");
     }
 
     private static class LoginRequiredInterceptor implements HandlerInterceptor {

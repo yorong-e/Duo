@@ -46,39 +46,75 @@ public class FurnitureService {
     private List<FurnitureItem> loadFurniture() {
         JdbcTemplate jdbcTemplate = jdbcTemplateProvider.getIfAvailable();
         if (jdbcTemplate == null) {
-            return loadCsvCatalog();
+            return loadFallbackCatalog();
         }
 
         try {
-            return jdbcTemplate.query("""
-                    SELECT id, category, image_url, name, size, price, product_url,
-                           width_cm, depth_cm, height_cm, color, model_path
-                    FROM furniture
-                    """, (rs, rowNum) -> mapFurnitureRow(rs));
+            List<FurnitureItem> items = jdbcTemplate.query("""
+                    SELECT sku_id, product_name, category, width_mm, depth_mm, height_mm,
+                           price_krw, model_path, color_hex
+                    FROM furniture_sku
+                    WHERE is_active = 1
+                    """, (rs, rowNum) -> mapFurnitureSkuRow(rs));
+            if (!items.isEmpty()) {
+                return items;
+            }
+            log.warn("furniture_sku table returned no active rows; using fallback catalog");
+            return loadFallbackCatalog();
         } catch (DataAccessException ex) {
-            log.warn("Could not load model_path from database; trying color-only furniture catalog", ex);
+            log.warn("Could not load furniture_sku from database; trying legacy furniture table: {}", ex.getMessage());
             try {
-                return jdbcTemplate.query("""
-                        SELECT id, category, image_url, name, size, price, product_url,
-                               width_cm, depth_cm, height_cm, color, NULL AS model_path
+                List<FurnitureItem> legacyItems = jdbcTemplate.query("""
+                        SELECT category, image_url, name, size_description, color, price,
+                               product_url, width_cm, depth_cm, height_cm, glb_model_url
                         FROM furniture
-                        """, (rs, rowNum) -> mapFurnitureRow(rs));
+                        """, (rs, rowNum) -> mapFurnitureRow(rs, rowNum));
+                if (!legacyItems.isEmpty()) {
+                    return legacyItems;
+                }
+                log.warn("Legacy furniture table returned no rows; using fallback catalog");
+                return loadFallbackCatalog();
             } catch (DataAccessException colorOnlyEx) {
-                log.warn("Could not load furniture from database; using CSV fallback catalog", colorOnlyEx);
-                return loadCsvCatalog();
+                log.warn("Could not load legacy furniture table; using fallback catalog: {}", colorOnlyEx.getMessage());
+                return loadFallbackCatalog();
             }
         }
     }
 
-    private FurnitureItem mapFurnitureRow(ResultSet rs) throws SQLException {
+    private FurnitureItem mapFurnitureSkuRow(ResultSet rs) throws SQLException {
+        String skuId = rs.getString("sku_id");
+        String productName = rs.getString("product_name");
+        String category = rs.getString("category");
+        String modelPath = rs.getString("model_path");
+        String color = inferColor(productName + " " + category + " " + modelPath + " " + rs.getString("color_hex"));
         return new FurnitureItem(
-                String.valueOf(rs.getObject("id")),
+                skuId,
+                productName,
+                category,
+                formatPrice(rs.getString("price_krw")),
+                "",
+                color,
+                normalizeModelPath(modelPath, category, color),
+                "",
+                "",
+                rs.getDouble("width_mm") / 10.0,
+                rs.getDouble("depth_mm") / 10.0,
+                rs.getDouble("height_mm") / 10.0
+        );
+    }
+
+    private FurnitureItem mapFurnitureRow(ResultSet rs, int rowNum) throws SQLException {
+        String category = rs.getString("category");
+        String color = normalizeColor(rs.getString("color"));
+        String modelPath = rs.getString("glb_model_url");
+        return new FurnitureItem(
+                "db-" + (rowNum + 1),
                 rs.getString("name"),
-                rs.getString("category"),
+                category,
                 rs.getString("price"),
-                rs.getString("size"),
-                normalizeColor(rs.getString("color")),
-                normalizeModelPath(rs.getString("model_path"), rs.getString("category"), rs.getString("color")),
+                rs.getString("size_description"),
+                color,
+                normalizeModelPath(modelPath, category, color),
                 rs.getString("image_url"),
                 rs.getString("product_url"),
                 rs.getDouble("width_cm"),
@@ -90,6 +126,11 @@ public class FurnitureService {
     private List<FurnitureItem> loadCsvCatalog() {
         ClassPathResource resource = new ClassPathResource("furniture.csv");
 
+        if (!resource.exists()) {
+            log.warn("Classpath furniture.csv not found; using built-in fallback catalog");
+            return defaultFurnitureCatalog();
+        }
+
         try (Reader reader = new InputStreamReader(resource.getInputStream(), StandardCharsets.UTF_8);
              CSVParser parser = CSVFormat.DEFAULT.builder()
                      .setHeader()
@@ -100,8 +141,47 @@ public class FurnitureService {
                     .map(this::mapFurnitureCsvRecord)
                     .toList();
         } catch (IOException ex) {
-            throw new IllegalStateException("Could not load classpath furniture.csv fallback catalog", ex);
+            log.warn("Could not load classpath furniture.csv fallback catalog; using built-in fallback catalog", ex);
+            return defaultFurnitureCatalog();
         }
+    }
+
+    private List<FurnitureItem> loadFallbackCatalog() {
+        List<FurnitureItem> csvItems = loadCsvCatalog();
+        return csvItems.isEmpty() ? defaultFurnitureCatalog() : csvItems;
+    }
+
+    private List<FurnitureItem> defaultFurnitureCatalog() {
+        return List.of(
+                defaultItem("default-sofa-gray", "그레이 소파", "sofa", "790000", "3인", "gray",
+                        "/static/models/sofa/gray_sofa.glb", 210, 90, 80),
+                defaultItem("default-sofa-brown", "브라운 소파", "sofa", "820000", "3인", "brown",
+                        "/static/models/sofa/brown_sofa.glb", 210, 90, 80),
+                defaultItem("default-sofa-blue", "블루 커브 소파", "sofa", "890000", "3인", "blue",
+                        "/static/models/curve_sofa/blue_curve_sofa.glb", 220, 95, 78),
+                defaultItem("default-bed-white", "화이트 침대", "bed", "650000", "single", "white",
+                        "/static/models/bed/single_white_bed.glb", 110, 210, 85),
+                defaultItem("default-bed-black", "블랙 침대", "bed", "680000", "single", "black",
+                        "/static/models/bed/single_black_bed.glb", 110, 210, 85)
+        );
+    }
+
+    private FurnitureItem defaultItem(String id, String name, String category, String price, String size,
+                                      String color, String modelPath, double width, double depth, double height) {
+        return new FurnitureItem(
+                id,
+                name,
+                category,
+                price,
+                size,
+                color,
+                modelPath,
+                "",
+                "",
+                width,
+                depth,
+                height
+        );
     }
 
     private FurnitureItem mapFurnitureCsvRecord(CSVRecord record) {
@@ -131,22 +211,35 @@ public class FurnitureService {
     private String inferColor(CSVRecord record) {
         String text = (record.get("이름") + " " + record.get("사이즈") + " " + record.get("이미지") + " " + record.get("URL"))
                 .toLowerCase(Locale.ROOT);
-        if (text.contains("black") || text.contains("dark")) {
+        return inferColor(text);
+    }
+
+    private String inferColor(String text) {
+        text = text == null ? "" : text.toLowerCase(Locale.ROOT);
+        if (text.contains("black") || text.contains("dark") || text.contains("블랙") || text.contains("검정")) {
             return "black";
         }
-        if (text.contains("grey") || text.contains("gray")) {
+        if (text.contains("grey") || text.contains("gray") || text.contains("그레이") || text.contains("회색")) {
             return "gray";
         }
-        if (text.contains("brown") || text.contains("rust") || text.contains("golden")) {
+        if (text.contains("brown") || text.contains("rust") || text.contains("golden") || text.contains("브라운") || text.contains("갈색")) {
             return "brown";
         }
-        if (text.contains("blue")) {
+        if (text.contains("blue") || text.contains("블루") || text.contains("파랑")) {
             return "blue";
         }
-        if (text.contains("white") || text.contains("beige") || text.contains("natural")) {
+        if (text.contains("white") || text.contains("beige") || text.contains("natural") || text.contains("화이트") || text.contains("베이지")) {
             return "white";
         }
         return "gray";
+    }
+
+    private String formatPrice(String value) {
+        if (value == null || value.isBlank()) {
+            return "0";
+        }
+        int dot = value.indexOf('.');
+        return dot >= 0 ? value.substring(0, dot) : value;
     }
 
     private String inferModelPath(CSVRecord record) {
@@ -155,6 +248,9 @@ public class FurnitureService {
 
     private String normalizeModelPath(String modelPath, String category, String color) {
         if (modelPath != null && !modelPath.isBlank()) {
+            if (modelPath.startsWith("http://") || modelPath.startsWith("https://")) {
+                return modelPath;
+            }
             return modelPath.startsWith("/") ? modelPath : "/" + modelPath;
         }
 
@@ -182,7 +278,11 @@ public class FurnitureService {
         return switch (value) {
             case "grey" -> "gray";
             case "dark grey", "dark gray" -> "black";
-            case "off-white", "beige", "natural", "cream" -> "white";
+            case "off-white", "beige", "natural", "cream", "화이트", "베이지", "아이보리" -> "white";
+            case "그레이", "회색" -> "gray";
+            case "브라운", "갈색" -> "brown";
+            case "블랙", "검정", "검은색" -> "black";
+            case "블루", "파랑", "파란색" -> "blue";
             default -> value;
         };
     }

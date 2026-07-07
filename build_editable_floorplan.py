@@ -35,9 +35,11 @@ ROOM_MIN_AREA_RATIO = 0.0012
 ROOM_STRUCT_THRESH = 130
 ROOM_SEAL_MIN_KERNEL = 17
 ROOM_SEAL_MAX_KERNEL = 61
-PLAN_CONTENT_THRESH = 248
+PLAN_DARK_CONTENT_THRESH = 170
+PLAN_COLOR_CHROMA_THRESH = 14
+PLAN_COLOR_BRIGHTNESS_MAX = 245
 PLAN_CLOSE_KERNEL = 55
-PLAN_DILATE_KERNEL = 9
+PLAN_DILATE_KERNEL = 3
 
 
 def encode_png_data_uri(img):
@@ -59,11 +61,35 @@ def rgba_from_mask(img, mask):
     return cv2.merge([b, g, r, dilated])
 
 
-def extract_plan_footprint_mask(img):
+def wall_bounded_interior_mask(wall_mask, wall_thickness):
+    """벽 마스크를 벽 두께 기준으로 문/창 틈만 메운 뒤, 외곽에서 플러드필로 벽 안쪽 영역만 남긴다.
+    이렇게 만든 영역은 벽 벡터화에 쓰인 wall_mask와 동일한 경계를 갖기 때문에
+    바닥 폴리곤을 여기에 맞추면 벽과 바닥이 항상 같은 기준으로 정렬된다."""
+    h, w = wall_mask.shape
+    kernel_size = int(round(max(ROOM_SEAL_MIN_KERNEL, min(ROOM_SEAL_MAX_KERNEL, wall_thickness * 1.8))))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    seal_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    sealed_walls = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, seal_kernel)
+
+    flood = sealed_walls.copy()
+    ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+    for pt in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+        if flood[pt[1], pt[0]] == 0:
+            cv2.floodFill(flood, ff_mask, pt, 255)
+
+    interior = np.zeros_like(wall_mask)
+    interior[(flood == 0) & (sealed_walls == 0)] = 255
+    return interior
+
+
+def extract_plan_footprint_mask(img, wall_mask=None, wall_thickness=10.0):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     b, g, r = cv2.split(img)
     chroma = np.maximum.reduce([r, g, b]) - np.minimum.reduce([r, g, b])
-    content = (((gray < PLAN_CONTENT_THRESH) | (chroma > 10)) * 255).astype(np.uint8)
+    colored_content = (chroma >= PLAN_COLOR_CHROMA_THRESH) & (gray < PLAN_COLOR_BRIGHTNESS_MAX)
+    dark_content = gray < PLAN_DARK_CONTENT_THRESH
+    content = ((colored_content | dark_content) * 255).astype(np.uint8)
 
     content = cv2.morphologyEx(
         content,
@@ -75,6 +101,11 @@ def extract_plan_footprint_mask(img):
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (PLAN_DILATE_KERNEL, PLAN_DILATE_KERNEL)),
     )
 
+    if wall_mask is not None and np.any(wall_mask):
+        # 벽 벡터와 같은 기준(wall_mask)으로 안쪽 영역을 구해 합쳐두면,
+        # 색 기반 콘텐츠 검출이 놓친 부분(얇은 난간선 등)도 벽 위치에 맞춰 채워진다.
+        content = cv2.bitwise_or(content, wall_bounded_interior_mask(wall_mask, wall_thickness))
+
     contours, _ = cv2.findContours(content, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     mask = np.zeros_like(gray)
     min_area = max(extract_layers.FLOOR_MIN_AREA, int(gray.size * 0.002))
@@ -83,14 +114,12 @@ def extract_plan_footprint_mask(img):
             cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
 
     if not np.any(mask):
-        return extract_layers.extract_floor_mask(img, np.zeros_like(gray))
+        return extract_layers.extract_floor_mask(img, wall_mask if wall_mask is not None else np.zeros_like(gray))
     return mask
 
 
 def components_to_polygons(mask, min_area):
-    # 성분 간 헤어라인 틈을 메워 인접 바닥 폴리곤이 살짝 겹치도록 함
-    sealed = cv2.dilate(mask, np.ones((3, 3), np.uint8))
-    contours, _ = cv2.findContours(sealed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     polygons = []
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -220,18 +249,18 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
     height, width = img.shape[:2]
 
     wall_mask = extract_walls.extract_wall_mask(img)
-    floor_mask = extract_plan_footprint_mask(img)
+    thickness = estimate_wall_thickness(wall_mask)
+    floor_mask = extract_plan_footprint_mask(img, wall_mask, thickness)
     floor_only, floor_alpha = extract_layers.cut(img, floor_mask)
 
-    thickness = estimate_wall_thickness(wall_mask)
     segments = vectorize(wall_mask, thickness, debug_dir=debug_dir)
     walls = [
         segment_to_wall(i, seg)
         for i, seg in enumerate(sorted(segments, key=lambda s: -math.hypot(s[2] - s[0], s[3] - s[1])))
     ]
     floors = components_to_polygons(floor_mask, extract_layers.FLOOR_MIN_AREA)
-    room_masks = split_floor_into_room_masks(img, floor_mask, wall_mask, thickness)
-    rooms = masks_to_polygons(room_masks, "room", "room", extract_layers.FLOOR_MIN_AREA)
+    room_masks = []
+    rooms = []
 
     payload = copy.deepcopy(src_json)
     attrs = dict(payload.get("@attributes", {}))
@@ -252,7 +281,7 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         "render_mode": "reconstructed_vectors",
         "wall_source": "extract_walls.extract_wall_mask",
         "floor_source": "extract_plan_footprint_mask",
-        "room_source": "split_floor_into_room_masks",
+        "room_source": None,
         "wall_count": len(walls),
         "floor_count": len(floors),
         "room_count": len(rooms),

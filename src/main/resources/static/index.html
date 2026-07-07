@@ -29,10 +29,10 @@
       <label for="floorPlanInput" class="upload-btn">평면도 업로드</label>
       <input type="file" id="floorPlanInput" accept=".json" hidden>
 
-      <button id="btn-wall-add" class="ghost-btn" type="button">벽 추가</button>
       <button id="btn-save" class="ghost-btn" type="button">저장</button>
       <button id="btn-load" class="ghost-btn" type="button">불러오기</button>
       <button id="btn-pdf" class="ghost-btn" type="button">PDF 견적서</button>
+      <button id="btn-render-2d" class="ghost-btn" type="button">2D 렌더링</button>
       <button id="btn-accept" class="primary-btn" type="button">3D 렌더링</button>
     </div>
   </header>
@@ -82,6 +82,7 @@
           <h2>벽지</h2>
           <span id="wall-material-name">화이트 실크</span>
         </div>
+        <button id="btn-wall-add" class="ghost-btn panel-action" type="button">벽 추가</button>
         <div id="wall-materials" class="material-grid" aria-label="Wall materials"></div>
       </section>
 
@@ -109,7 +110,7 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="/static/js/auth-nav.js?v=3"></script>
-  <script src="/static/js/main.js?v=24"></script>
+  <script src="/static/js/main.js?v=36"></script>
 
 </body>
 </html>

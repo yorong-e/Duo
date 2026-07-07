@@ -3,9 +3,19 @@
 
   const STORAGE_KEY = "duo-layout-v2";
   const MM_TO_SCENE = 0.001;
-  const FLOOR_PLAN_TARGET_SIZE = 20;
+  const GRID_CELL_MM = 500;
+  const GRID_MIN_EXTENT_M = 80;
+  const GRID_PADDING_M = 12;
+  const FLOOR_PLAN_PIXELS_PER_GRID_CELL = 50;
+  const FLOOR_PLAN_PIXEL_MM = GRID_CELL_MM / FLOOR_PLAN_PIXELS_PER_GRID_CELL;
+  const FLOOR_PLAN_PIXEL_TO_SCENE = FLOOR_PLAN_PIXEL_MM * MM_TO_SCENE;
+  const FALLBACK_FLOOR_PLAN_SIZE_M = 12;
   const SNAP_DISTANCE = 0.35;
+  const WALL_MAGNET_DISTANCE = 1.2;
+  const WALL_MAGNET_OVERLAP_MARGIN = 0.35;
   const WALL_BUFFER = 0.04;
+  const DEFAULT_WALL_COLOR = 0x111827;
+  const PARTITION_WALL_MAX_THICKNESS_M = 0.2;
   const IMAGE_WALL_DARKNESS = 92;
   const IMAGE_WALL_ALPHA = 24;
   const FLOOR_COLOR_TOLERANCE = 64;
@@ -19,9 +29,8 @@
   const ROOM_GAP_TOLERANCE_STEPS = [0.5, 1.0, 1.6, 2.4];
   const FLOOR_SEAM_MARGIN = 0;
   const FLOOR_SIMPLIFY_TOLERANCE = 0.025;
-  const FLOOR_TILE_CELL_SIZE = 1;
-  const FLOOR_TILE_MIN_COVERAGE = 0.38;
-  const FLOOR_TILE_CENTER_MIN_COVERAGE = 0.16;
+  const FLOOR_MASK_TARGET_WIDTH = 1024;
+  const RENDERED_WALL_HEIGHT_RATIO = 0.6;
 
   const COLOR_FILTERS = [
     { value: "all", label: "All", swatch: "linear-gradient(135deg, #f8fafc, #004b87)" },
@@ -110,6 +119,8 @@
     controls: null,
     floorPlanGroup: null,
     visualizationGroup: null,
+    gridHelper: null,
+    renderMode: "2d",
     floorBounds: null,
     floorObjects: [],
     baseFloorObjects: [],
@@ -117,6 +128,7 @@
     selectedRoomId: null,
     imageFloorMask: null,
     imageWallMask: null,
+    floorLockedToPlan: false,
     wallObjects: [],
     furnitureMeshes: [],
     selectedFurniture: null,
@@ -184,15 +196,11 @@
     dirLight.castShadow = true;
     state.scene.add(dirLight);
 
-    const grid = new THREE.GridHelper(20, 20, 0x004b87, 0xaaaaaa);
-    grid.position.y = 0.01;
-    state.scene.add(grid);
-
     state.floorPlanGroup = new THREE.Group();
     state.floorPlanGroup.name = "floorPlan";
     state.scene.add(state.floorPlanGroup);
 
-    setFloorBounds({ minX: -10, maxX: 10, minZ: -10, maxZ: 10 });
+    setFloorBounds({ minX: -GRID_MIN_EXTENT_M / 2, maxX: GRID_MIN_EXTENT_M / 2, minZ: -GRID_MIN_EXTENT_M / 2, maxZ: GRID_MIN_EXTENT_M / 2 });
   }
 
   function getCanvasContainer() {
@@ -217,9 +225,11 @@
     bindClick("btn-delete", () => deleteSelectedFurniture(toolbar));
     bindClick("btn-wall-add", toggleWallDrawingMode);
     bindClick("btn-accept", acceptLayout);
+    bindClick("btn-render-2d", show2DLayout);
     bindClick("btn-save", saveLayout);
     bindClick("btn-load", loadSavedLayout);
     bindClick("btn-pdf", downloadEstimatePdf);
+    updateRenderModeButtons();
 
     if (labelInput) {
       labelInput.addEventListener("input", () => {
@@ -271,7 +281,7 @@
     if (wallHits.length > 0) {
       const wall = wallHits[0].object;
       selectWall(wall, toolbar);
-      if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
+      if (isEditableWall(wall) && raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
         state.wallDragOffset.copy(planeIntersectPoint).sub(wall.position);
         state.isWallDragging = true;
         state.controls.enabled = false;
@@ -316,7 +326,7 @@
       );
       clearVisualization();
       if (state.selectionHelper) state.selectionHelper.update();
-      rebuildRoomsFromWalls();
+      refreshRoomsAfterWallEdit();
       updateSafetyState("벽 위치를 조정했습니다.");
       return;
     }
@@ -384,6 +394,7 @@
       state.selectionHelper = new THREE.BoxHelper(model, 0x004b87);
       state.scene.add(state.selectionHelper);
       if (toolbar) toolbar.style.display = "flex";
+      setWallToolbarLocked(toolbar, false);
       if (labelInput) labelInput.value = model.userData.label || model.userData.productName || "자재";
     } else if (toolbar) {
       toolbar.style.display = "none";
@@ -401,11 +412,24 @@
       state.selectionHelper = new THREE.BoxHelper(wall, 0xf59e0b);
       state.scene.add(state.selectionHelper);
       if (toolbar) toolbar.style.display = "flex";
+      setWallToolbarLocked(toolbar, !isEditableWall(wall));
       if (labelInput) labelInput.value = wall.userData.label || wall.userData.id || "벽";
-      updateSceneStatus("벽 편집 모드", "선택한 벽을 드래그하거나 90도 회전, 삭제할 수 있습니다.");
+      updateSceneStatus(
+        wall.userData.locked ? "구조벽 잠금" : "가벽 편집 모드",
+        wall.userData.locked ? "두꺼운 구조벽은 이동, 회전, 삭제할 수 없습니다." : "선택한 가벽은 이동, 회전, 삭제할 수 있습니다."
+      );
     } else if (toolbar && !state.selectedFurniture) {
       toolbar.style.display = "none";
+      setWallToolbarLocked(toolbar, false);
     }
+  }
+
+  function setWallToolbarLocked(toolbar, locked) {
+    if (!toolbar) return;
+    const rotate = document.getElementById("btn-rotate");
+    const del = document.getElementById("btn-delete");
+    if (rotate) rotate.disabled = locked;
+    if (del) del.disabled = locked;
   }
 
   function selectRoom(room) {
@@ -432,10 +456,14 @@
 
   function rotateSelectedFurniture() {
     if (state.selectedWall) {
+      if (!isEditableWall(state.selectedWall)) {
+        updateSafetyState("구조벽은 회전할 수 없습니다.");
+        return;
+      }
       clearVisualization();
       state.selectedWall.rotation.y += Math.PI / 2;
       if (state.selectionHelper) state.selectionHelper.update();
-      rebuildRoomsFromWalls();
+      refreshRoomsAfterWallEdit();
       updateSafetyState("벽을 90도 회전했습니다.");
       return;
     }
@@ -450,6 +478,10 @@
   function deleteSelectedFurniture(toolbar) {
     if (state.selectedWall) {
       const wall = state.selectedWall;
+      if (!isEditableWall(wall)) {
+        updateSafetyState("구조벽은 삭제할 수 없습니다.");
+        return;
+      }
       if (wall.parent) wall.parent.remove(wall);
       disposeObject3D(wall);
       state.wallObjects = state.wallObjects.filter((m) => m !== wall);
@@ -457,7 +489,7 @@
       clearVisualization();
       state.selectedWall = null;
       if (toolbar) toolbar.style.display = "none";
-      rebuildRoomsFromWalls();
+      refreshRoomsAfterWallEdit();
       updateSafetyState("벽을 삭제했습니다.");
       return;
     }
@@ -513,7 +545,7 @@
     const end = snapWallEnd(start, point);
     if (start.distanceTo(end) >= 0.12) {
       addSceneWall(start, end);
-      rebuildRoomsFromWalls();
+      refreshRoomsAfterWallEdit();
       updateSafetyState("벽을 추가했습니다.");
     }
     cancelWallDrawing();
@@ -666,7 +698,7 @@
     const attrs = getFloorPlanPixelSize(planData);
     textureLoader.load(imageDataUri, (texture) => {
       clearFloorPlan();
-      const scale = FLOOR_PLAN_TARGET_SIZE / Math.max(attrs.width, attrs.height);
+      const scale = FLOOR_PLAN_PIXEL_TO_SCENE;
       const planeW = attrs.width * scale;
       const planeH = attrs.height * scale;
       const mesh = new THREE.Mesh(
@@ -678,17 +710,18 @@
 
       const group = new THREE.Group();
       group.name = "floorPlan";
+      state.floorLockedToPlan = false;
       group.add(mesh);
       const imageTransform = {
         scale,
-        toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: planeH / 2 - point.y * scale }),
+        toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: point.y * scale - planeH / 2 }),
       };
       addWallsToGroup(group, planData, imageTransform);
       state.scene.add(group);
       state.floorPlanGroup = group;
       setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
       buildImageFloorMask(imageDataUri, attrs.width, attrs.height, planeW, planeH);
-      focusCameraOnArea(planeW, planeH, new THREE.Vector3(0, 0, 0));
+      focusCameraOnPlanContent(planeW, planeH, new THREE.Vector3(0, 0, 0));
       updateSceneStatus("평면도 로드 완료", "타일 바닥색 영역만 가구 배치 가능 영역으로 인식합니다.");
       updateSafetyState();
     });
@@ -964,7 +997,7 @@
   function loadReconstructedFloorPlan(planData) {
     clearFloorPlan();
     const attrs = getFloorPlanPixelSize(planData);
-    const scale = FLOOR_PLAN_TARGET_SIZE / Math.max(attrs.width, attrs.height);
+    const scale = FLOOR_PLAN_PIXEL_TO_SCENE;
     const planeW = attrs.width * scale;
     const planeH = attrs.height * scale;
     const group = new THREE.Group();
@@ -974,10 +1007,11 @@
     state.baseFloorObjects = [];
     state.roomObjects = [];
     state.selectedRoomId = null;
+    state.floorLockedToPlan = false;
 
     const imageTransform = {
       scale,
-      toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: planeH / 2 - point.y * scale }),
+      toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: point.y * scale - planeH / 2 }),
     };
 
     addWallsToGroup(group, planData, imageTransform);
@@ -990,7 +1024,7 @@
       const usedExtractedRooms = loadExtractedRoomsFromPlan(planData, attrs);
       if (!usedExtractedRooms) rebuildRoomsFromWalls();
     }
-    focusCameraOnArea(planeW, planeH, new THREE.Vector3(0, 0, 0));
+    focusCameraOnPlanContent(planeW, planeH, new THREE.Vector3(0, 0, 0));
     updateSceneStatus(
       "재구성 평면도 로드 완료",
       usedExtractedFootprint ? "평면도 이미지 영역 전체를 바닥으로 인식합니다." : "벽으로 닫힌 내부 공간을 방 단위 바닥으로 인식합니다."
@@ -1087,8 +1121,8 @@
   }
 
   function addFallbackFloorPlane(group, transform) {
-    const width = FLOOR_PLAN_TARGET_SIZE;
-    const height = FLOOR_PLAN_TARGET_SIZE;
+    const width = FALLBACK_FLOOR_PLAN_SIZE_M;
+    const height = FALLBACK_FLOOR_PLAN_SIZE_M;
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(width, height),
       createFloorMaterial()
@@ -1154,7 +1188,7 @@
     if (floors.length === 0 || !state.floorBounds) return false;
 
     clearRoomFloors();
-    const width = 320;
+    const width = FLOOR_MASK_TARGET_WIDTH;
     const height = Math.max(96, Math.round(width * attrs.height / Math.max(attrs.width, 1)));
     const combined = new Uint8Array(width * height);
 
@@ -1189,6 +1223,7 @@
     });
     state.imageFloorMask = buildMaskFromRooms(roomData);
     state.selectedRoomId = null;
+    state.floorLockedToPlan = true;
     return true;
   }
 
@@ -1197,7 +1232,7 @@
     if (rooms.length === 0 || !state.floorBounds) return false;
 
     clearRoomFloors();
-    const width = 320;
+    const width = FLOOR_MASK_TARGET_WIDTH;
     const height = Math.max(96, Math.round(width * attrs.height / Math.max(attrs.width, 1)));
     const roomData = { width, height, bounds: state.floorBounds, rooms: [] };
 
@@ -1224,6 +1259,7 @@
     });
     state.imageFloorMask = buildMaskFromRooms(roomData);
     state.selectedRoomId = null;
+    state.floorLockedToPlan = true;
     return true;
   }
 
@@ -1238,8 +1274,8 @@
     ctx.fillStyle = "#000";
     ctx.beginPath();
     points.forEach((point, index) => {
-      const x = (Number(point.x) / Math.max(attrs.width - 1, 1)) * (width - 1);
-      const y = (Number(point.y) / Math.max(attrs.height - 1, 1)) * (height - 1);
+      const x = ((Number(point.x) + 0.5) / Math.max(attrs.width, 1)) * width - 0.5;
+      const y = ((Number(point.y) + 0.5) / Math.max(attrs.height, 1)) * height - 0.5;
       if (index === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
@@ -1303,6 +1339,11 @@
     if (state.selectedRoomId && !state.roomObjects.some((room) => room.userData.id === state.selectedRoomId)) {
       state.selectedRoomId = null;
     }
+  }
+
+  function refreshRoomsAfterWallEdit() {
+    if (state.floorLockedToPlan) return;
+    rebuildRoomsFromWalls();
   }
 
   function clearRoomFloors() {
@@ -1494,7 +1535,7 @@
     const py = (room.bbox.minY + room.bbox.maxY) / 2;
     return {
       x: roomData.bounds.minX + (px / Math.max(roomData.width - 1, 1)) * roomData.bounds.width,
-      z: roomData.bounds.maxZ - (py / Math.max(roomData.height - 1, 1)) * roomData.bounds.depth,
+      z: roomData.bounds.minZ + (py / Math.max(roomData.height - 1, 1)) * roomData.bounds.depth,
     };
   }
 
@@ -1508,8 +1549,14 @@
     canvas.width = roomData.width;
     canvas.height = roomData.height;
     const ctx = canvas.getContext("2d");
-    const tiledMask = createGridAlignedFloorMask(room.mask, roomData);
-    drawGridAlignedFloorPattern(ctx, tiledMask, roomData, getFloorMaterialByValue(room.floorMaterial));
+    ctx.imageSmoothingEnabled = false;
+    const patternTexture = createFloorPatternCanvas(getFloorMaterialByValue(room.floorMaterial), canvas.width, canvas.height);
+    ctx.drawImage(patternTexture, 0, 0);
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    for (let i = 3, p = 0; i < image.data.length; i += 4, p += 1) {
+      image.data[i] = room.mask[p] ? 255 : 0;
+    }
+    ctx.putImageData(image, 0, 0);
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.ClampToEdgeWrapping;
     texture.wrapT = THREE.ClampToEdgeWrapping;
@@ -1523,103 +1570,10 @@
     });
   }
 
-  function drawGridAlignedFloorPattern(ctx, tiledMask, roomData, material) {
-    const width = roomData.width;
-    const height = roomData.height;
-    const bounds = roomData.bounds;
-    const cellSize = Math.max(FLOOR_TILE_CELL_SIZE, 0.1);
-    const startX = Math.floor(bounds.minX / cellSize) * cellSize;
-    const endX = Math.ceil(bounds.maxX / cellSize) * cellSize;
-    const startZ = Math.floor(bounds.minZ / cellSize) * cellSize;
-    const endZ = Math.ceil(bounds.maxZ / cellSize) * cellSize;
-    const patternCanvas = createFloorPatternCanvas(material, 96, 96);
-
-    ctx.clearRect(0, 0, width, height);
-    for (let cellX = startX; cellX < endX; cellX += cellSize) {
-      for (let cellZ = startZ; cellZ < endZ; cellZ += cellSize) {
-        const pixelBox = sceneCellToMaskPixelBox(cellX, cellZ, cellSize, width, height, bounds);
-        if (!maskBoxHasPixel(tiledMask, width, pixelBox)) continue;
-
-        const x = pixelBox.minX;
-        const y = pixelBox.minY;
-        const w = Math.max(pixelBox.maxX - pixelBox.minX + 1, 1);
-        const h = Math.max(pixelBox.maxY - pixelBox.minY + 1, 1);
-        ctx.drawImage(patternCanvas, x, y, w, h);
-        ctx.strokeStyle = "rgba(255,255,255,0.26)";
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x + 0.5, y + 0.5, Math.max(w - 1, 1), Math.max(h - 1, 1));
-      }
-    }
-  }
-
-  function maskBoxHasPixel(mask, width, pixelBox) {
-    for (let y = pixelBox.minY; y <= pixelBox.maxY; y += 1) {
-      const row = y * width;
-      for (let x = pixelBox.minX; x <= pixelBox.maxX; x += 1) {
-        if (mask[row + x]) return true;
-      }
-    }
-    return false;
-  }
-
-  function createGridAlignedFloorMask(sourceMask, roomData) {
-    const width = roomData.width;
-    const height = roomData.height;
-    const result = new Uint8Array(width * height);
-    const bounds = roomData.bounds;
-    const cellSize = Math.max(FLOOR_TILE_CELL_SIZE, 0.1);
-    const startX = Math.floor(bounds.minX / cellSize) * cellSize;
-    const endX = Math.ceil(bounds.maxX / cellSize) * cellSize;
-    const startZ = Math.floor(bounds.minZ / cellSize) * cellSize;
-    const endZ = Math.ceil(bounds.maxZ / cellSize) * cellSize;
-
-    for (let cellX = startX; cellX < endX; cellX += cellSize) {
-      for (let cellZ = startZ; cellZ < endZ; cellZ += cellSize) {
-        const pixelBox = sceneCellToMaskPixelBox(cellX, cellZ, cellSize, width, height, bounds);
-        const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
-        let hits = 0;
-        for (let y = pixelBox.minY; y <= pixelBox.maxY; y += 1) {
-          const row = y * width;
-          for (let x = pixelBox.minX; x <= pixelBox.maxX; x += 1) {
-            if (sourceMask[row + x]) hits += 1;
-          }
-        }
-        if (!shouldFillFloorTileCell(sourceMask, width, pixelBox, hits / area)) continue;
-        for (let y = pixelBox.minY; y <= pixelBox.maxY; y += 1) {
-          const row = y * width;
-          for (let x = pixelBox.minX; x <= pixelBox.maxX; x += 1) {
-            result[row + x] = 1;
-          }
-        }
-      }
-    }
-    return result;
-  }
-
-  function shouldFillFloorTileCell(sourceMask, width, pixelBox, coverage) {
-    if (coverage >= FLOOR_TILE_MIN_COVERAGE) return true;
-    if (coverage < FLOOR_TILE_CENTER_MIN_COVERAGE) return false;
-    const centerX = Math.round((pixelBox.minX + pixelBox.maxX) / 2);
-    const centerY = Math.round((pixelBox.minY + pixelBox.maxY) / 2);
-    return Boolean(sourceMask[centerY * width + centerX]);
-  }
-
-  function sceneCellToMaskPixelBox(cellX, cellZ, cellSize, width, height, bounds) {
-    const minPixel = scenePointToRoomPixel(cellX, cellZ + cellSize, width, height, bounds);
-    const maxPixel = scenePointToRoomPixel(cellX + cellSize, cellZ, width, height, bounds);
-    return {
-      minX: clamp(Math.min(minPixel.x, maxPixel.x), 0, width - 1),
-      maxX: clamp(Math.max(minPixel.x, maxPixel.x), 0, width - 1),
-      minY: clamp(Math.min(minPixel.y, maxPixel.y), 0, height - 1),
-      maxY: clamp(Math.max(minPixel.y, maxPixel.y), 0, height - 1),
-    };
-  }
-
   function buildMaskFromRooms(roomData) {
     const mask = new Uint8Array(roomData.width * roomData.height);
     roomData.rooms.forEach((room) => {
-      const roomMask = createGridAlignedFloorMask(room.mask, roomData);
-      roomMask.forEach((value, index) => {
+      room.mask.forEach((value, index) => {
         if (value) mask[index] = 1;
       });
     });
@@ -1636,7 +1590,7 @@
   function scenePointToRoomPixel(x, z, width, height, bounds) {
     return {
       x: clamp(Math.round(((x - bounds.minX) / bounds.width) * (width - 1)), 0, width - 1),
-      y: clamp(Math.round(((bounds.maxZ - z) / bounds.depth) * (height - 1)), 0, height - 1),
+      y: clamp(Math.round(((z - bounds.minZ) / bounds.depth) * (height - 1)), 0, height - 1),
     };
   }
 
@@ -1653,6 +1607,7 @@
     const group = new THREE.Group();
     group.name = "floorPlan";
     state.wallObjects = [];
+    state.floorLockedToPlan = false;
     const vectorTransform = {
       scale: MM_TO_SCENE,
       toScenePoint: (point) => ({ x: point.x * MM_TO_SCENE, z: point.y * MM_TO_SCENE }),
@@ -1665,14 +1620,15 @@
     const depth = (planData.depth || 4000) * MM_TO_SCENE;
     setFloorBounds({ minX: 0, maxX: width, minZ: 0, maxZ: depth });
     rebuildRoomsFromWalls();
-    focusCameraOnArea(width, depth);
-    updateSceneStatus("벡터 평면도 로드 완료", "벽체 충돌과 외곽 벽 자석을 적용합니다.");
+    focusCameraOnPlanContent(width, depth);
+    updateSceneStatus("벡터 평면도 로드 완료", "벽체 충돌과 경계 스냅을 적용합니다.");
     updateSafetyState();
   }
 
   function addWallsToGroup(group, planData, transform) {
     if (!Array.isArray(planData.walls)) return;
     planData.walls.forEach((wall) => addWallToGroup(group, wall, transform));
+    classifyWallsByThickness();
   }
 
   function addWallToGroup(group, wall, transform) {
@@ -1702,9 +1658,9 @@
     const length = Math.sqrt(dx * dx + dz * dz);
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(length, 0.055, thickness),
-      new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.78, transparent: true, opacity: 0.52 })
+      new THREE.MeshStandardMaterial({ color: DEFAULT_WALL_COLOR, roughness: 0.78 })
     );
-    mesh.position.set((start.x + end.x) * 0.5, 0.018, (start.z + end.z) * 0.5);
+    mesh.position.set((start.x + end.x) * 0.5, 0.032, (start.z + end.z) * 0.5);
     mesh.rotation.y = -Math.atan2(dz, dx);
     mesh.userData = {
       type: "wall",
@@ -1712,13 +1668,33 @@
       id: meta.id,
       label: meta.label,
       editable: meta.editable,
+      locked: meta.locked || false,
+      wallRole: meta.wallRole || "partition",
       source: meta.source,
       renderHeight: height,
       wallMaterial: state.activeWallMaterial,
+      wallpaperApplied: false,
     };
     mesh.castShadow = false;
     mesh.receiveShadow = true;
     return mesh;
+  }
+
+  function classifyWallsByThickness() {
+    state.wallObjects.forEach((wall) => {
+      if (!wall.userData.source) return;
+      const params = wall.geometry && wall.geometry.parameters;
+      const thickness = params ? Number(params.depth) || 0 : 0;
+      const structural = thickness > PARTITION_WALL_MAX_THICKNESS_M;
+      wall.userData.wallRole = structural ? "structural" : "partition";
+      wall.userData.locked = structural;
+      wall.userData.editable = !structural && wall.userData.editable !== false;
+      if (wall.material) wall.material.color.setHex(DEFAULT_WALL_COLOR);
+    });
+  }
+
+  function isEditableWall(wall) {
+    return Boolean(wall && wall.userData && wall.userData.editable !== false && !wall.userData.locked);
   }
 
   function firstNumber(...values) {
@@ -1739,6 +1715,26 @@
       get depth() { return this.maxZ - this.minZ; },
       get center() { return new THREE.Vector3((this.minX + this.maxX) / 2, 0, (this.minZ + this.maxZ) / 2); },
     };
+    updateGridForBounds(state.floorBounds);
+  }
+
+  function updateGridForBounds(bounds) {
+    if (!state.scene || !bounds) return;
+    const cellSize = GRID_CELL_MM * MM_TO_SCENE;
+    const boundsWidth = Math.max(bounds.maxX - bounds.minX, 0);
+    const boundsDepth = Math.max(bounds.maxZ - bounds.minZ, 0);
+    const extent = Math.ceil(Math.max(GRID_MIN_EXTENT_M, boundsWidth + GRID_PADDING_M, boundsDepth + GRID_PADDING_M) / cellSize) * cellSize;
+    const divisions = Math.max(1, Math.round(extent / cellSize));
+
+    if (state.gridHelper) {
+      state.scene.remove(state.gridHelper);
+      state.gridHelper.geometry.dispose();
+      state.gridHelper.material.dispose();
+    }
+
+    state.gridHelper = new THREE.GridHelper(extent, divisions, 0x004b87, 0xaaaaaa);
+    state.gridHelper.position.set((bounds.minX + bounds.maxX) / 2, 0.01, (bounds.minZ + bounds.maxZ) / 2);
+    state.scene.add(state.gridHelper);
   }
 
   function clearFloorPlan() {
@@ -1749,6 +1745,7 @@
     state.floorPlanGroup = null;
     state.imageFloorMask = null;
     state.imageWallMask = null;
+    state.floorLockedToPlan = false;
     state.wallObjects = [];
     state.floorObjects = [];
     state.baseFloorObjects = [];
@@ -1937,7 +1934,7 @@
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(4, 4);
+    texture.repeat.set(8, 8);
     return texture;
   }
 
@@ -1967,7 +1964,7 @@
   }
 
   function drawPlanks(ctx, colors) {
-    const plankWidth = 32;
+    const plankWidth = 8;
     const width = ctx.canvas.width;
     const height = ctx.canvas.height;
     for (let x = 0; x < width; x += plankWidth) {
@@ -1978,11 +1975,11 @@
       ctx.moveTo(x, 0);
       ctx.lineTo(x, height);
       ctx.stroke();
-      for (let y = 0; y < height; y += 64) {
+      for (let y = 0; y < height; y += 32) {
         ctx.strokeStyle = "rgba(255,255,255,0.12)";
         ctx.beginPath();
-        ctx.moveTo(x + 4, y + 12);
-        ctx.lineTo(x + plankWidth - 4, y + 22);
+        ctx.moveTo(x + 2, y + 6);
+        ctx.lineTo(x + plankWidth - 2, y + 12);
         ctx.stroke();
       }
     }
@@ -1992,8 +1989,8 @@
     const width = ctx.canvas.width;
     const height = ctx.canvas.height;
     ctx.strokeStyle = "rgba(73, 49, 31, 0.34)";
-    ctx.lineWidth = 10;
-    for (let i = -width; i < width * 2; i += 32) {
+    ctx.lineWidth = 3;
+    for (let i = -width; i < width * 2; i += 8) {
       ctx.beginPath();
       ctx.moveTo(i, 0);
       ctx.lineTo(i + width / 2, height / 2);
@@ -2001,12 +1998,12 @@
       ctx.stroke();
     }
     ctx.strokeStyle = "rgba(255,255,255,0.18)";
-    ctx.lineWidth = 3;
-    for (let i = -width; i < width * 2; i += 32) {
+    ctx.lineWidth = 1;
+    for (let i = -width; i < width * 2; i += 8) {
       ctx.beginPath();
-      ctx.moveTo(i + 16, 0);
-      ctx.lineTo(i + width / 2 + 16, height / 2);
-      ctx.lineTo(i + 16, height);
+      ctx.moveTo(i + 4, 0);
+      ctx.lineTo(i + width / 2 + 4, height / 2);
+      ctx.lineTo(i + 4, height);
       ctx.stroke();
     }
   }
@@ -2056,21 +2053,80 @@
   }
 
   function createWallMaterialFromValue(value) {
-    const material = getWallMaterialByValue(value);
+    const texture = createWallTexture(getWallMaterialByValue(value));
+    texture.repeat.set(2, 1);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
     return new THREE.MeshStandardMaterial({
-      color: material.color,
+      color: 0xffffff,
+      map: texture,
       roughness: 0.72,
-      transparent: true,
-      opacity: 0.94,
     });
+  }
+
+  function createWallSideMaterial(value) {
+    const material = getWallMaterialByValue(value);
+    const texture = createWallTexture(material);
+    texture.repeat.set(3, 1);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    return new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: texture,
+      roughness: 0.72,
+    });
+  }
+
+  function createWallCoreMaterial() {
+    return new THREE.MeshStandardMaterial({
+      color: DEFAULT_WALL_COLOR,
+      roughness: 0.82,
+    });
+  }
+
+  function createWallTexture(material) {
+    const canvas = createWallPatternCanvas(material, 192, 192);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  function createWallPatternCanvas(material, width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    const base = `#${material.color.toString(16).padStart(6, "0")}`;
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, width, height);
+    ctx.strokeStyle = "rgba(255,255,255,0.24)";
+    ctx.lineWidth = 1;
+    for (let y = 12; y < height; y += 24) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(width, y + 6);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "rgba(15,23,42,0.08)";
+    for (let x = 0; x < width; x += 18) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x + 10, height);
+      ctx.stroke();
+    }
+    return canvas;
   }
 
   function applyWallMaterial() {
     const active = getActiveWallMaterial();
     const walls = state.selectedRoomId ? getWallsForRoom(state.selectedRoomId) : state.wallObjects;
     walls.forEach((wall) => {
-      if (wall.material) wall.material.color.setHex(active.color);
+      if (wall.material) {
+        disposeMaterial(wall.material);
+        wall.material = createWallMaterialFromValue(state.activeWallMaterial);
+      }
       wall.userData.wallMaterial = state.activeWallMaterial;
+      wall.userData.wallpaperApplied = true;
     });
     state.roomObjects.forEach((room) => {
       if (!state.selectedRoomId || room.userData.id === state.selectedRoomId) {
@@ -2201,10 +2257,14 @@
     return info;
   }
 
-  function spawnFurniture(item, options) {
+  async function spawnFurniture(item, options) {
     options = options || {};
     clearVisualization();
-    const pivot = create2DFurniturePivot(item);
+    const pivot = await createGLBFurniturePivot(item) || create2DFurniturePivot(item);
+    addPlacedFurniturePivot(pivot, options);
+  }
+
+  function addPlacedFurniturePivot(pivot, options) {
     pivot.position.set(options.x || 0, pivot.userData.centerY || 0, options.z || 0);
     pivot.rotation.y = options.rot || 0;
     state.scene.add(pivot);
@@ -2221,6 +2281,21 @@
     }
     updateSafetyState();
     updateEstimate();
+  }
+
+  async function createGLBFurniturePivot(item) {
+    const paths = [item.model_path, item.modelPath, resolveModelPath(item), "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"].filter(Boolean);
+    const gltf = await loadGltfWithFallback(paths);
+    if (!gltf) return null;
+
+    const model = gltf.scene;
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const targetW = Math.max((Number(item.width) || 150) * 0.01, 0.18);
+    const targetH = Math.max((Number(item.height) || 80) * 0.01, 0.18);
+    const targetD = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
+    return createCenteredFurniturePivot(model, item, "2d-glb");
   }
 
   function create2DFurniturePivot(item) {
@@ -2269,7 +2344,11 @@
   }
 
   function furniturePlanColor(item) {
-    switch (normalizeColor(item.color)) {
+    return furnitureColorHex(item.color);
+  }
+
+  function furnitureColorHex(color) {
+    switch (normalizeColor(color)) {
       case "black": return 0x1f2937;
       case "brown": return 0x8b5e3c;
       case "blue": return 0x2159b7;
@@ -2278,58 +2357,35 @@
     }
   }
 
-  function loadFurnitureModel(paths, item, options, index) {
-    index = index || 0;
-    const path = paths[index];
-    if (!path) {
-      console.error("가구 모델을 불러오지 못했습니다.", item);
-      return;
-    }
-    gltfLoader.load(
-      path,
-      (gltf) => onFurnitureModelLoaded(gltf, item, options),
-      undefined,
-      () => loadFurnitureModel(paths, item, options, index + 1)
-    );
+  function applyFurnitureColorToModel(root, color) {
+    const hex = furnitureColorHex(color);
+    root.traverse((obj) => {
+      if (!obj.isMesh || !obj.material) return;
+      obj.material = Array.isArray(obj.material)
+        ? obj.material.map((material) => cloneFurnitureMaterial(material, hex))
+        : cloneFurnitureMaterial(obj.material, hex);
+    });
   }
 
-  function onFurnitureModelLoaded(gltf, item, options) {
-    const model = gltf.scene;
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    const targetW = (Number(item.width) || 150) * 0.01;
-    const targetH = (Number(item.height) || 80) * 0.01;
-    const targetD = (Number(item.depth) || 80) * 0.01;
-    model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
-
-    const pivot = createCenteredFurniturePivot(model, item);
-    pivot.position.set(options.x || 0, pivot.userData.centerY || 0, options.z || 0);
-    pivot.rotation.y = options.rot || 0;
-    state.scene.add(pivot);
-    state.furnitureMeshes.push(pivot);
-    const constrained = applyWallMagnetAndBounds(pivot, pivot.position);
-    pivot.position.copy(constrained.position);
-    if (!getBlockedPlacementAt(pivot, pivot.position)) {
-      pivot.userData.lastSafePosition = pivot.position.clone();
-    }
-
-    if (!state.suppressAutoSelect && options.select !== false) {
-      selectFurniture(pivot, document.getElementById("furniture-toolbar"));
-    }
-    updateSafetyState();
-    updateEstimate();
+  function cloneFurnitureMaterial(material, color) {
+    const cloned = material.clone();
+    if (cloned.color) cloned.color.setHex(color);
+    cloned.needsUpdate = true;
+    return cloned;
   }
 
-  function createCenteredFurniturePivot(model, item) {
+  function createCenteredFurniturePivot(model, item, renderMode) {
     const scaledBox = new THREE.Box3().setFromObject(model);
     const center = scaledBox.getCenter(new THREE.Vector3());
     const minY = scaledBox.min.y;
     const pivot = new THREE.Group();
     model.position.sub(center);
     pivot.add(model);
+    applyFurnitureColorToModel(pivot, item.color);
     pivot.name = item.product_name || "furniture";
     pivot.userData = {
       type: "furniture",
+      renderMode: renderMode || "3d",
       skuId: item.sku_id,
       productName: item.product_name || "자재",
       label: item.label || item.product_name || "자재",
@@ -2360,7 +2416,7 @@
     if (!bounds) return { position: desiredPosition.clone(), message: "" };
     const original = model.position.clone();
     model.position.copy(desiredPosition);
-    const box = getPlanBox(model);
+    let box = getPlanBox(model);
     const position = desiredPosition.clone();
     const messages = [];
 
@@ -2390,8 +2446,41 @@
       messages.push("하단 벽에 자석 스냅");
     }
 
+    model.position.copy(position);
+    box = getPlanBox(model);
+    const wallSnap = findNearestWallSnap(box);
+    if (wallSnap) {
+      position.x += wallSnap.dx;
+      position.z += wallSnap.dz;
+      messages.push("벽면 자석 스냅");
+    }
+
     model.position.copy(original);
     return { position, message: messages.join(", ") };
+  }
+
+  function findNearestWallSnap(modelBox) {
+    let best = null;
+    state.wallObjects.forEach((wall) => {
+      const wallBox = getPlanBox(wall);
+      const zOverlap = rangesOverlap(modelBox.minZ, modelBox.maxZ, wallBox.minZ, wallBox.maxZ, WALL_MAGNET_OVERLAP_MARGIN);
+      const xOverlap = rangesOverlap(modelBox.minX, modelBox.maxX, wallBox.minX, wallBox.maxX, WALL_MAGNET_OVERLAP_MARGIN);
+      considerWallSnap(wallBox.minX - modelBox.maxX, wallBox.minX - WALL_BUFFER - modelBox.maxX, 0, zOverlap);
+      considerWallSnap(modelBox.minX - wallBox.maxX, wallBox.maxX + WALL_BUFFER - modelBox.minX, 0, zOverlap);
+      considerWallSnap(wallBox.minZ - modelBox.maxZ, 0, wallBox.minZ - WALL_BUFFER - modelBox.maxZ, xOverlap);
+      considerWallSnap(modelBox.minZ - wallBox.maxZ, 0, wallBox.maxZ + WALL_BUFFER - modelBox.minZ, xOverlap);
+    });
+    return best;
+
+    function considerWallSnap(gap, dx, dz, overlapsAlongWall) {
+      if (!overlapsAlongWall || gap < 0 || gap > WALL_MAGNET_DISTANCE) return;
+      if (!best || gap < best.gap) best = { gap, dx, dz };
+    }
+  }
+
+  function rangesOverlap(aMin, aMax, bMin, bMax, margin) {
+    const extra = margin || 0;
+    return Math.min(aMax + extra, bMax + extra) - Math.max(aMin - extra, bMin - extra) > 0;
   }
 
   function getBlockedPlacementAt(model, position) {
@@ -2457,15 +2546,15 @@
     return {
       minX: clamp(Math.floor(((box.minX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1),
       maxX: clamp(Math.ceil(((box.maxX - bounds.minX) / bounds.width) * mask.width), 0, mask.width - 1),
-      minY: clamp(Math.floor(((bounds.maxZ - box.maxZ) / bounds.depth) * mask.height), 0, mask.height - 1),
-      maxY: clamp(Math.ceil(((bounds.maxZ - box.minZ) / bounds.depth) * mask.height), 0, mask.height - 1),
+      minY: clamp(Math.floor(((box.minZ - bounds.minZ) / bounds.depth) * mask.height), 0, mask.height - 1),
+      maxY: clamp(Math.ceil(((box.maxZ - bounds.minZ) / bounds.depth) * mask.height), 0, mask.height - 1),
     };
   }
 
   function planPointToPixel(x, z, mask, bounds) {
     return {
       x: clamp(Math.round(((x - bounds.minX) / bounds.width) * (mask.width - 1)), 0, mask.width - 1),
-      y: clamp(Math.round(((bounds.maxZ - z) / bounds.depth) * (mask.height - 1)), 0, mask.height - 1),
+      y: clamp(Math.round(((z - bounds.minZ) / bounds.depth) * (mask.height - 1)), 0, mask.height - 1),
     };
   }
 
@@ -2725,12 +2814,18 @@
   }
 
   async function acceptLayout() {
+    await show3DLayout();
+  }
+
+  async function show3DLayout() {
     clearSelectionHighlight();
     state.selectedFurniture = null;
     state.selectedWall = null;
     const toolbar = document.getElementById("furniture-toolbar");
     if (toolbar) toolbar.style.display = "none";
     clearVisualization();
+    state.renderMode = "3d";
+    updateRenderModeButtons();
     const bounds = calculateLayoutBounds();
     const visualization = new THREE.Group();
     visualization.name = "acceptedLayoutVisualization";
@@ -2742,9 +2837,31 @@
     setPlanningWallsVisible(false);
     updateSceneStatus("3D 렌더링 중", "배치한 가구를 3D 모델로 변환하고 있습니다.");
     await addRenderedFurnitureModels(visualization);
-    focusCameraOnArea(bounds.width, bounds.depth, bounds.center);
+    focusCameraOnPlanContent(bounds.width, bounds.depth, bounds.center);
     updateSafetyState();
     updateSceneStatus("3D 렌더링 완료", "벽체, 바닥, 배치 자재, 견적 상태가 갱신되었습니다.");
+  }
+
+  function show2DLayout() {
+    clearSelectionHighlight();
+    state.selectedFurniture = null;
+    state.selectedWall = null;
+    const toolbar = document.getElementById("furniture-toolbar");
+    if (toolbar) toolbar.style.display = "none";
+    clearVisualization();
+    state.renderMode = "2d";
+    updateRenderModeButtons();
+    const bounds = calculateLayoutBounds();
+    focusCameraOnPlanContent(bounds.width, bounds.depth, bounds.center);
+    updateSafetyState();
+    updateSceneStatus("2D 렌더링 완료", "평면도 위에서 벽과 GLB 가구를 다시 편집할 수 있습니다.");
+  }
+
+  function updateRenderModeButtons() {
+    const btn2d = document.getElementById("btn-render-2d");
+    const btn3d = document.getElementById("btn-accept");
+    if (btn2d) btn2d.classList.toggle("active", state.renderMode === "2d");
+    if (btn3d) btn3d.classList.toggle("active", state.renderMode === "3d");
   }
 
   async function addRenderedFurnitureModels(group) {
@@ -2802,18 +2919,16 @@
     state.wallObjects.forEach((wall) => {
       const params = wall.geometry && wall.geometry.parameters;
       if (!params) return;
-      const height = wall.userData.renderHeight || 2.4;
-      const material = createWallMaterialFromValue(wall.userData.wallMaterial || state.activeWallMaterial);
-      const rendered = createWall(params.width, height, params.depth, material);
-      material.dispose();
+      const height = (wall.userData.renderHeight || 2.4) * RENDERED_WALL_HEIGHT_RATIO;
+      const rendered = createWall(params.width, height, params.depth, wall.userData.wallMaterial || state.activeWallMaterial, wall.userData.wallpaperApplied);
       rendered.position.set(wall.position.x, height / 2, wall.position.z);
-      rendered.rotation.y = wall.rotation.y;
+      rendered.quaternion.copy(wall.quaternion);
       group.add(rendered);
     });
   }
 
   function calculateLayoutBounds() {
-    const bounds = state.floorBounds || { minX: -4, maxX: 4, minZ: -3, maxZ: 3 };
+    const bounds = getVisiblePlanBounds() || state.floorBounds || { minX: -4, maxX: 4, minZ: -3, maxZ: 3 };
     return {
       minX: bounds.minX,
       maxX: bounds.maxX,
@@ -2825,8 +2940,17 @@
     };
   }
 
-  function createWall(length, height, thickness, material) {
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(length, height, thickness), material.clone());
+  function createWall(length, height, thickness, wallpaperValue, wallpaperApplied) {
+    const core = createWallCoreMaterial();
+    const side = wallpaperApplied ? createWallSideMaterial(wallpaperValue) : createWallCoreMaterial();
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(length, height, thickness), [
+      core,
+      core.clone(),
+      core.clone(),
+      core.clone(),
+      side,
+      side.clone(),
+    ]);
     wall.receiveShadow = true;
     wall.castShadow = true;
     return wall;
@@ -2849,6 +2973,8 @@
     state.visualizationGroup = null;
     setPlanningFurnitureVisible(true);
     setPlanningWallsVisible(true);
+    state.renderMode = "2d";
+    updateRenderModeButtons();
   }
 
   function saveLayout() {
@@ -3029,13 +3155,16 @@
   function disposeObject3D(object) {
     object.traverse((obj) => {
       if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) {
-        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
-        materials.forEach((material) => {
-          if (material.map) material.map.dispose();
-          material.dispose();
-        });
-      }
+      if (obj.material) disposeMaterial(obj.material);
+    });
+  }
+
+  function disposeMaterial(materialOrMaterials) {
+    const materials = Array.isArray(materialOrMaterials) ? materialOrMaterials : [materialOrMaterials];
+    materials.forEach((material) => {
+      if (!material) return;
+      if (material.map) material.map.dispose();
+      material.dispose();
     });
   }
 
@@ -3045,6 +3174,38 @@
     state.camera.position.set(center.x + distance, distance, center.z + distance);
     state.controls.target.copy(center);
     state.controls.update();
+  }
+
+  function focusCameraOnPlanContent(fallbackWidth, fallbackDepth, fallbackCenter) {
+    const bounds = getVisiblePlanBounds();
+    if (!bounds) {
+      focusCameraOnArea(fallbackWidth, fallbackDepth, fallbackCenter);
+      return;
+    }
+    const paddedWidth = Math.max(bounds.width * 1.18, 1);
+    const paddedDepth = Math.max(bounds.depth * 1.18, 1);
+    focusCameraOnArea(paddedWidth, paddedDepth, bounds.center);
+  }
+
+  function getVisiblePlanBounds() {
+    const targets = [...state.roomObjects, ...state.wallObjects, ...state.baseFloorObjects].filter((object) => object && object.parent);
+    if (targets.length === 0) return null;
+
+    const box = new THREE.Box3();
+    targets.forEach((object) => box.expandByObject(object));
+    if (!Number.isFinite(box.min.x) || !Number.isFinite(box.max.x) || box.isEmpty()) return null;
+
+    const width = Math.max(box.max.x - box.min.x, 0.001);
+    const depth = Math.max(box.max.z - box.min.z, 0.001);
+    return {
+      minX: box.min.x,
+      maxX: box.max.x,
+      minZ: box.min.z,
+      maxZ: box.max.z,
+      width,
+      depth,
+      center: new THREE.Vector3((box.min.x + box.max.x) / 2, 0, (box.min.z + box.max.z) / 2),
+    };
   }
 
   function updateSceneStatus(title, detail) {

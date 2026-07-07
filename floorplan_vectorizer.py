@@ -124,14 +124,18 @@ def vectorize(mask, thickness, debug_dir=None):
     raw = cv2.HoughLinesP(residual, 1, np.pi / 180, 80,
                           minLineLength=klen * 2, maxLineGap=int(thickness))
     if raw is not None:
-        for l in raw:
-            x1, y1, x2, y2 = (int(v) for v in l[0])
+        # OpenCV 버전에 따라 (N,1,4) 또는 (N,4) 형태로 반환되므로 both를 지원.
+        for l in raw.reshape(-1, 4):
+            x1, y1, x2, y2 = (int(v) for v in l)
             ang = abs(math.degrees(math.atan2(y2 - y1, x2 - x1))) % 180
             if 10 < ang < 80 or 100 < ang < 170:  # 진짜 사선만
                 segs.append((x1, y1, x2, y2, thickness))
 
-    segs = merge_collinear(segs, gap=int(thickness * 1.5))
-    segs = snap_corners(segs, snap_dist=thickness * 1.2)
+    # 가로/세로 열림(opening)이 klen만큼 벽 끝을 깎아내므로, 코너를 다시 붙이는
+    # 병합/스냅 허용거리도 klen 기준으로 잡아야 한다 (thickness 기준만으로는 부족해
+    # 교차점마다 벽이 끊어져 보이는 문제가 있었음).
+    segs = merge_collinear(segs, gap=max(int(thickness * 1.5), klen))
+    segs = snap_corners(segs, snap_dist=max(thickness * 1.2, klen))
 
     if debug_dir:
         cv2.imwrite(os.path.join(debug_dir, "3_hmask.png"), hmask)

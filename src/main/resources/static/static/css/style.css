@@ -132,6 +132,15 @@ label {
   transform: translateY(-1px);
 }
 
+.primary-btn.active {
+  box-shadow: 0 0 0 3px rgba(0, 75, 135, 0.18);
+}
+
+.panel-action {
+  margin-bottom: 10px;
+  width: 100%;
+}
+
 .secondary-btn,
 .nav-link {
   background: var(--white);

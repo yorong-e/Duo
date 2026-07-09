@@ -14,6 +14,13 @@ public class FloorImageResourceConfig implements WebMvcConfigurer {
         String lowercaseLocation = directoryLocation("floorimage");
         registry.addResourceHandler("/floorimage/**")
                 .addResourceLocations(camelCaseLocation, lowercaseLocation);
+
+        registry.addResourceHandler("/wallpaperimage/**")
+                .addResourceLocations(
+                        directoryLocation("wallpaper_images"),
+                        directoryLocation("wallpaperImages"),
+                        directoryLocation("wallpaperimages")
+                );
     }
 
     private String directoryLocation(String name) {

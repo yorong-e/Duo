@@ -32,28 +32,13 @@
   const FLOOR_MASK_TARGET_WIDTH = 1024;
   const RENDERED_WALL_HEIGHT_RATIO = 0.6;
 
-  const COLOR_FILTERS = [
-    { value: "all", label: "All", swatch: "linear-gradient(135deg, #f8fafc, #004b87)" },
-    { value: "white", label: "White", swatch: "#ffffff" },
-    { value: "gray", label: "Gray", swatch: "#9ca3af" },
-    { value: "black", label: "Black", swatch: "#111827" },
-    { value: "brown", label: "Brown", swatch: "#8b5e3c" },
-    { value: "blue", label: "Blue", swatch: "#004b87" },
-  ];
-
   const CATALOG_SECTIONS = [
     { value: "furniture", label: "가구" },
     { value: "floor", label: "바닥" },
     { value: "wallpaper", label: "벽지" },
   ];
 
-  const FURNITURE_CATEGORY_FILTERS = [
-    { value: "all", label: "전체", keywords: [] },
-    { value: "sofa", label: "소파", keywords: ["소파", "sofa", "seat"] },
-    { value: "desk", label: "책상", keywords: ["책상", "desk", "table", "테이블"] },
-    { value: "chair", label: "의자", keywords: ["의자", "chair"] },
-    { value: "bed", label: "침대", keywords: ["침대", "bed"] },
-  ];
+  const ALL_FURNITURE_CATEGORY = "all";
 
   const FLOOR_MATERIALS = [
     { value: "oak", label: "세로형 마루 07", color: 0x8a5a3f, swatch: "linear-gradient(90deg, #6f432f 0 20%, #9c6b4d 20% 40%, #5f3828 40% 60%, #b6815c 60% 80%, #754934 80%)" },
@@ -134,6 +119,7 @@
     wallObjects: [],
     furnitureMeshes: [],
     selectedFurniture: null,
+    selectedRenderedFurniture: null,
     selectedWall: null,
     selectionHelper: null,
     collisionHelpers: [],
@@ -146,9 +132,9 @@
     wallPreview: null,
     catalogItems: [],
     floorMaterials: [],
-    activeColor: "all",
+    wallMaterials: [],
     activeCatalogSection: "furniture",
-    activeFurnitureCategory: "all",
+    activeFurnitureCategory: ALL_FURNITURE_CATEGORY,
     activeFloorMaterial: "oak",
     activeWallMaterial: "white",
     activePattern: "A",
@@ -175,6 +161,7 @@
     renderWallMaterials();
     loadCatalog();
     loadFloorMaterials();
+    loadWallMaterials();
     window.addEventListener("resize", onWindowResize);
     window.addEventListener("keydown", onKeyDown);
     animate();
@@ -268,7 +255,25 @@
       handleWallDrawingClick();
       return;
     }
-    const intersects = raycaster.intersectObjects(state.furnitureMeshes, true);
+    if (state.renderMode === "3d" && state.visualizationGroup) {
+      const renderedHits = raycaster.intersectObjects(state.visualizationGroup.children, true);
+      const renderedFurniture = renderedHits
+        .map((hit) => findRenderedFurnitureRoot(hit.object))
+        .find(Boolean);
+      if (renderedFurniture && renderedFurniture.userData.sourcePlanModel) {
+        const planModel = renderedFurniture.userData.sourcePlanModel;
+        selectFurniture(planModel, toolbar, renderedFurniture);
+        if (raycaster.ray.intersectPlane(groundPlane, planeIntersectPoint)) {
+          state.dragOffset.copy(planeIntersectPoint).sub(planModel.position);
+          state.isDragging = true;
+          state.controls.enabled = false;
+        }
+        return;
+      }
+    }
+    const intersects = state.renderMode === "3d"
+      ? []
+      : raycaster.intersectObjects(state.furnitureMeshes, true);
 
     if (intersects.length > 0) {
       const root = findFurnitureRoot(intersects[0].object);
@@ -357,17 +362,32 @@
       state.blockedDragWarning = "";
       updateSafetyState(snapped.message);
     }
+    syncRenderedFurniturePosition(state.selectedFurniture, state.selectedRenderedFurniture);
     if (state.selectionHelper) state.selectionHelper.update();
     updateEstimate();
   }
 
-  function onPointerUp() {
+  async function onPointerUp() {
     if (!state.isDragging && !state.isWallDragging) return;
+    const needs3DRefresh = state.renderMode === "3d" && (state.isDragging || state.isWallDragging);
     state.isDragging = false;
     state.isWallDragging = false;
     state.controls.enabled = true;
     updateSafetyState();
     updateEstimate();
+    if (needs3DRefresh) {
+      await refresh3DVisualization();
+    }
+  }
+
+  function syncRenderedFurniturePosition(planModel, renderedModel) {
+    if (!planModel || !renderedModel) return;
+    renderedModel.position.set(
+      planModel.position.x,
+      renderedModel.userData.centerY || planModel.userData.centerY || 0,
+      planModel.position.z
+    );
+    renderedModel.rotation.y = planModel.rotation.y;
   }
 
   function onCatalogDrop(e, container) {
@@ -387,15 +407,25 @@
     return current;
   }
 
-  function selectFurniture(model, toolbar) {
+  function findRenderedFurnitureRoot(object) {
+    let current = object;
+    while (current && current !== state.visualizationGroup) {
+      if (current.userData && current.userData.sourcePlanModel) return current;
+      current = current.parent;
+    }
+    return null;
+  }
+
+  function selectFurniture(model, toolbar, renderedModel) {
     clearSelectionHighlight();
     state.selectedFurniture = model;
+    state.selectedRenderedFurniture = renderedModel || null;
     state.selectedWall = null;
     if (model) selectRoom(null);
     const labelInput = document.getElementById("material-label-input");
 
     if (model) {
-      state.selectionHelper = new THREE.BoxHelper(model, 0x004b87);
+      state.selectionHelper = new THREE.BoxHelper(renderedModel || model, 0x004b87);
       state.scene.add(state.selectionHelper);
       if (toolbar) toolbar.style.display = "flex";
       setWallToolbarLocked(toolbar, null);
@@ -408,6 +438,7 @@
   function selectWall(wall, toolbar) {
     clearSelectionHighlight();
     state.selectedFurniture = null;
+    state.selectedRenderedFurniture = null;
     state.selectedWall = wall;
     if (wall) selectRoom(null);
     const labelInput = document.getElementById("material-label-input");
@@ -458,28 +489,39 @@
     state.selectionHelper = null;
   }
 
-  function rotateSelectedFurniture() {
+  async function rotateSelectedFurniture() {
+    const was3D = state.renderMode === "3d";
     if (state.selectedWall) {
       if (!isMovableWall(state.selectedWall)) {
         updateSafetyState("추출된 벽은 회전할 수 없습니다.");
         return;
       }
-      clearVisualization();
       state.selectedWall.rotation.y += Math.PI / 2;
       if (state.selectionHelper) state.selectionHelper.update();
       refreshRoomsAfterWallEdit();
+      if (was3D) {
+        await refresh3DVisualization();
+      } else {
+        clearVisualization();
+      }
       updateSafetyState("벽을 90도 회전했습니다.");
       return;
     }
     if (!state.selectedFurniture) return;
-    clearVisualization();
     state.selectedFurniture.rotation.y += Math.PI / 2;
+    syncRenderedFurniturePosition(state.selectedFurniture, state.selectedRenderedFurniture);
     if (state.selectionHelper) state.selectionHelper.update();
+    if (was3D) {
+      await refresh3DVisualization();
+    } else {
+      clearVisualization();
+    }
     updateSafetyState();
     updateEstimate();
   }
 
-  function deleteSelectedFurniture(toolbar) {
+  async function deleteSelectedFurniture(toolbar) {
+    const was3D = state.renderMode === "3d";
     if (state.selectedWall) {
       const wall = state.selectedWall;
       if (!isDeletableWall(wall)) {
@@ -491,10 +533,14 @@
       disposeObject3D(wall);
       state.wallObjects = state.wallObjects.filter((m) => m !== wall);
       clearSelectionHighlight();
-      clearVisualization();
       state.selectedWall = null;
       if (toolbar) toolbar.style.display = "none";
       refreshRoomsAfterWallEdit();
+      if (was3D) {
+        await refresh3DVisualization();
+      } else {
+        clearVisualization();
+      }
       updateSafetyState("벽을 삭제했습니다.");
       return;
     }
@@ -505,9 +551,18 @@
     disposeObject3D(model);
     state.furnitureMeshes = state.furnitureMeshes.filter((m) => m !== model);
     clearSelectionHighlight();
-    clearVisualization();
+    if (state.selectedRenderedFurniture && state.selectedRenderedFurniture.parent) {
+      state.selectedRenderedFurniture.parent.remove(state.selectedRenderedFurniture);
+      disposeObject3D(state.selectedRenderedFurniture);
+    }
     state.selectedFurniture = null;
+    state.selectedRenderedFurniture = null;
     if (toolbar) toolbar.style.display = "none";
+    if (was3D) {
+      await refresh3DVisualization();
+    } else {
+      clearVisualization();
+    }
     updateSafetyState();
     updateEstimate();
   }
@@ -1231,6 +1286,7 @@
     state.imageFloorMask = buildMaskFromRooms(roomData);
     state.selectedRoomId = null;
     state.floorLockedToPlan = true;
+    updateEstimate();
     return true;
   }
 
@@ -1267,6 +1323,7 @@
     state.imageFloorMask = buildMaskFromRooms(roomData);
     state.selectedRoomId = null;
     state.floorLockedToPlan = true;
+    updateEstimate();
     return true;
   }
 
@@ -1346,6 +1403,7 @@
     if (state.selectedRoomId && !state.roomObjects.some((room) => room.userData.id === state.selectedRoomId)) {
       state.selectedRoomId = null;
     }
+    updateEstimate();
   }
 
   function refreshRoomsAfterWallEdit() {
@@ -1992,6 +2050,7 @@
     state.selectedRoomId = null;
     state.selectedWall = null;
     clearVisualization();
+    updateEstimate();
   }
 
   async function loadCatalog() {
@@ -2001,9 +2060,9 @@
       const res = await fetch("/api/furniture");
       if (!res.ok) throw new Error("API 요청 실패");
       state.catalogItems = await res.json();
+      ensureActiveFurnitureCategory();
       renderCatalogTabs();
       renderFurnitureCategoryFilters();
-      renderColorFilters();
       renderCatalog();
       updateEstimate();
     } catch (err) {
@@ -2024,10 +2083,32 @@
       renderFloorMaterials();
       renderCatalog();
       refreshRoomFloorMaterials(state.roomObjects);
+      updateEstimate();
     } catch (err) {
       console.warn("바닥재 데이터를 불러오지 못했습니다. 기본 패턴을 사용합니다.", err);
       state.floorMaterials = [];
       renderFloorMaterials();
+      updateEstimate();
+    }
+  }
+
+  async function loadWallMaterials() {
+    try {
+      const res = await fetch("/api/wallpapers");
+      if (!res.ok) throw new Error("벽지 API 요청 실패");
+      const items = await res.json();
+      state.wallMaterials = items.map(mapWallpaperItem).filter(Boolean);
+      if (state.wallMaterials.length > 0 && !state.wallMaterials.some((item) => item.value === state.activeWallMaterial)) {
+        state.activeWallMaterial = state.wallMaterials[0].value;
+      }
+      renderWallMaterials();
+      renderCatalog();
+      updateEstimate();
+    } catch (err) {
+      console.warn("벽지 데이터를 불러오지 못했습니다. 기본 패턴을 사용합니다.", err);
+      state.wallMaterials = [];
+      renderWallMaterials();
+      updateEstimate();
     }
   }
 
@@ -2050,6 +2131,31 @@
       color: 0xb98f66,
       swatch: imageUrl ? `url("${imageUrl}") center / cover` : "linear-gradient(90deg, #b6815c, #6f432f)",
     };
+  }
+
+  function mapWallpaperItem(item, index) {
+    const productCode = String(item.productCode || item.product_code || "").trim();
+    const name = String(item.name || productCode || "벽지").trim();
+    const value = productCode || `wallpaper-${index + 1}`;
+    const imageUrl = item.imageUrl || item.image_url || "";
+    return {
+      value,
+      label: name,
+      productCode,
+      series: item.series || "",
+      widthMm: Number(item.widthMm || item.width_mm) || 0,
+      lengthM: Number(item.lengthM || item.length_m) || 0,
+      imageUrl,
+      detailUrl: item.detailUrl || item.detail_url || "",
+      price: item.price || "",
+      color: inferWallpaperColor(index),
+      swatch: imageUrl ? `url("${imageUrl}") center / cover` : "linear-gradient(135deg, #ffffff, #e5e7eb)",
+    };
+  }
+
+  function inferWallpaperColor(index) {
+    const fallback = [0xf8fafc, 0xd6cbbd, 0xc7ccd1, 0xa9b7a2, 0xa9bfd0, 0x4b5563];
+    return fallback[index % fallback.length];
   }
 
   function renderCatalogTabs() {
@@ -2075,7 +2181,6 @@
   function updateCatalogSections() {
     const isFurniture = state.activeCatalogSection === "furniture";
     setElementVisible("furniture-category-filter", isFurniture);
-    setElementVisible("color-filter", isFurniture);
     setElementVisible("furniture-list", isFurniture);
     setElementVisible("floor-material-section", state.activeCatalogSection === "floor");
     setElementVisible("wall-material-section", state.activeCatalogSection === "wallpaper");
@@ -2090,7 +2195,8 @@
     const el = document.getElementById("furniture-category-filter");
     if (!el) return;
     el.innerHTML = "";
-    FURNITURE_CATEGORY_FILTERS.forEach((filter) => {
+    ensureActiveFurnitureCategory();
+    getFurnitureCategoryFilters().forEach((filter) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "category-filter-btn" + (state.activeFurnitureCategory === filter.value ? " active" : "");
@@ -2104,23 +2210,21 @@
     });
   }
 
-  function renderColorFilters() {
-    const el = document.getElementById("color-filter");
-    if (!el) return;
-    el.innerHTML = "";
-    COLOR_FILTERS.forEach((filter) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "color-filter-btn" + (state.activeColor === filter.value ? " active" : "");
-      button.innerHTML = `<span class="swatch"></span><span>${filter.label}</span>`;
-      button.querySelector(".swatch").style.background = filter.swatch;
-      button.addEventListener("click", () => {
-        state.activeColor = filter.value;
-        renderColorFilters();
-        renderCatalog();
-      });
-      el.appendChild(button);
-    });
+  function getFurnitureCategoryFilters() {
+    const categories = unique(state.catalogItems
+      .map((item) => String(item.category || "").trim())
+      .filter(Boolean));
+    return [
+      { value: ALL_FURNITURE_CATEGORY, label: "전체" },
+      ...categories.map((category) => ({ value: category, label: category })),
+    ];
+  }
+
+  function ensureActiveFurnitureCategory() {
+    const filters = getFurnitureCategoryFilters();
+    if (!filters.some((filter) => filter.value === state.activeFurnitureCategory)) {
+      state.activeFurnitureCategory = ALL_FURNITURE_CATEGORY;
+    }
   }
 
   function renderTrendPatterns() {
@@ -2164,7 +2268,7 @@
     const label = document.getElementById("wall-material-name");
     if (!el) return;
     el.innerHTML = "";
-    WALL_MATERIALS.forEach((material) => {
+    getWallMaterials().forEach((material) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "material-btn" + (state.activeWallMaterial === material.value ? " active" : "");
@@ -2194,11 +2298,15 @@
   }
 
   function getActiveWallMaterial() {
-    return WALL_MATERIALS.find((material) => material.value === state.activeWallMaterial) || WALL_MATERIALS[0];
+    return getWallMaterials().find((material) => material.value === state.activeWallMaterial) || getWallMaterials()[0];
   }
 
   function getWallMaterialByValue(value) {
-    return WALL_MATERIALS.find((material) => material.value === value) || getActiveWallMaterial();
+    return getWallMaterials().find((material) => material.value === value) || getActiveWallMaterial();
+  }
+
+  function getWallMaterials() {
+    return state.wallMaterials.length > 0 ? state.wallMaterials : WALL_MATERIALS;
   }
 
   function createFloorMaterial() {
@@ -2309,7 +2417,8 @@
     ctx.globalAlpha = 1;
   }
 
-  function applyFloorMaterial() {
+  async function applyFloorMaterial() {
+    const was3D = state.renderMode === "3d";
     const targets = state.selectedRoomId
       ? state.roomObjects.filter((room) => room.userData.id === state.selectedRoomId)
       : state.roomObjects;
@@ -2317,8 +2426,13 @@
       room.userData.floorMaterial = state.activeFloorMaterial;
     });
     refreshRoomFloorMaterials(targets);
-    clearVisualization();
+    if (was3D) {
+      await refresh3DVisualization();
+    } else {
+      clearVisualization();
+    }
     updateSceneStatus("바닥 마감재 적용", `${state.selectedRoomId ? "선택한 방을" : "전체 방을"} ${getActiveFloorMaterial().label} 마감으로 변경했습니다.`);
+    updateEstimate();
   }
 
   function refreshRoomFloorMaterials(rooms) {
@@ -2378,6 +2492,13 @@
   }
 
   function createWallTexture(material) {
+    if (material.imageUrl) {
+      const texture = textureLoader.load(material.imageUrl);
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.repeat.set(3, 2);
+      return texture;
+    }
     const canvas = createWallPatternCanvas(material, 192, 192);
     const texture = new THREE.CanvasTexture(canvas);
     texture.needsUpdate = true;
@@ -2410,7 +2531,8 @@
     return canvas;
   }
 
-  function applyWallMaterial() {
+  async function applyWallMaterial() {
+    const was3D = state.renderMode === "3d";
     const active = getActiveWallMaterial();
     const walls = state.selectedRoomId ? getWallsForRoom(state.selectedRoomId) : state.wallObjects;
     walls.forEach((wall) => {
@@ -2426,8 +2548,13 @@
         room.userData.wallMaterial = state.activeWallMaterial;
       }
     });
-    clearVisualization();
+    if (was3D) {
+      await refresh3DVisualization();
+    } else {
+      clearVisualization();
+    }
     updateSceneStatus("벽지 적용", `${state.selectedRoomId ? "선택한 방을" : "전체 방을"} ${active.label} 벽지로 변경했습니다.`);
+    updateEstimate();
   }
 
   function getWallsForRoom(roomId) {
@@ -2459,7 +2586,7 @@
     const countEl = document.getElementById("catalog-count");
     if (!listEl) return;
     if (state.activeCatalogSection !== "furniture") {
-      if (countEl) countEl.textContent = state.activeCatalogSection === "floor" ? `${getFloorMaterials().length} finishes` : `${WALL_MATERIALS.length} finishes`;
+      if (countEl) countEl.textContent = state.activeCatalogSection === "floor" ? `${getFloorMaterials().length} finishes` : `${getWallMaterials().length} finishes`;
       return;
     }
     const items = getFilteredCatalogItems();
@@ -2477,18 +2604,13 @@
 
   function getFilteredCatalogItems() {
     return state.catalogItems.filter((item) => {
-      const colorOk = state.activeColor === "all" || normalizeColor(item.color) === state.activeColor;
-      const categoryOk = furnitureCategoryMatches(item, state.activeFurnitureCategory);
-      return colorOk && categoryOk;
+      return furnitureCategoryMatches(item, state.activeFurnitureCategory);
     });
   }
 
   function furnitureCategoryMatches(item, filterValue) {
-    if (filterValue === "all") return true;
-    const filter = FURNITURE_CATEGORY_FILTERS.find((entry) => entry.value === filterValue);
-    if (!filter) return true;
-    const text = `${item.category || ""} ${item.product_name || ""} ${item.name || ""} ${item.size || ""}`.toLowerCase();
-    return filter.keywords.some((keyword) => text.includes(keyword.toLowerCase()));
+    if (filterValue === ALL_FURNITURE_CATEGORY) return true;
+    return String(item.category || "").trim() === filterValue;
   }
 
   function createFurnitureCard(item) {
@@ -2524,13 +2646,10 @@
     info.className = "furniture-info";
     const row = document.createElement("div");
     row.className = "furniture-meta-row";
-    const swatch = document.createElement("span");
-    swatch.className = "swatch";
-    swatch.style.background = getColorSwatch(item.color);
     const categoryEl = document.createElement("span");
     categoryEl.textContent = item.category || "Furniture";
     categoryEl.className = "furniture-category";
-    row.append(swatch, categoryEl);
+    row.append(categoryEl);
     info.appendChild(row);
 
     const nameEl = document.createElement("div");
@@ -2539,7 +2658,7 @@
     info.appendChild(nameEl);
 
     const metaEl = document.createElement("div");
-    metaEl.textContent = `${item.size ? item.size + " · " : ""}${formatDimensions(item)} · ${formatColorLabel(item.color)}`;
+    metaEl.textContent = `${item.size ? item.size + " · " : ""}${formatDimensions(item)}`;
     metaEl.className = "furniture-meta";
     info.appendChild(metaEl);
 
@@ -2552,9 +2671,16 @@
 
   async function spawnFurniture(item, options) {
     options = options || {};
-    clearVisualization();
+    const was3D = state.renderMode === "3d";
+    if (!was3D) {
+      clearVisualization();
+    }
     const pivot = await createGLBFurniturePivot(item) || create2DFurniturePivot(item);
     addPlacedFurniturePivot(pivot, options);
+    if (was3D) {
+      pivot.visible = false;
+      await refresh3DVisualization();
+    }
   }
 
   function addPlacedFurniturePivot(pivot, options) {
@@ -2577,24 +2703,25 @@
   }
 
   async function createGLBFurniturePivot(item) {
-    const explicitPath = item.model_path || item.modelPath;
-    const paths = [explicitPath, resolveModelPath(item), "/static/models/sofa/gray_sofa.glb"].filter(Boolean);
+    const paths = resolveModelPaths(item);
     const gltf = await loadGltfWithFallback(paths);
     if (!gltf) return null;
 
     const model = gltf.scene;
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
-    const targetW = Math.max((Number(item.width) || 150) * 0.01, 0.18);
-    const targetH = Math.max((Number(item.height) || 80) * 0.01, 0.18);
-    const targetD = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    const dimensions = getItemDimensions(item);
+    const targetW = Math.max((dimensions.width || 150) * 0.01, 0.18);
+    const targetH = Math.max((dimensions.height || 80) * 0.01, 0.18);
+    const targetD = Math.max((dimensions.depth || 80) * 0.01, 0.18);
     model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
     return createCenteredFurniturePivot(model, item, "2d-glb");
   }
 
   function create2DFurniturePivot(item) {
-    const width = Math.max((Number(item.width) || 150) * 0.01, 0.18);
-    const depth = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    const dimensions = getItemDimensions(item);
+    const width = Math.max((dimensions.width || 150) * 0.01, 0.18);
+    const depth = Math.max((dimensions.depth || 80) * 0.01, 0.18);
     const height = 0.045;
     const color = furniturePlanColor(item);
     const pivot = new THREE.Group();
@@ -2621,17 +2748,13 @@
       label: item.label || item.product_name || "자재",
       category: item.category || "",
       color: normalizeColor(item.color),
-      modelPath: item.model_path || resolveModelPath(item),
+      modelPath: getExplicitModelPath(item) || resolveModelPath(item),
       imageUrl: item.image_url || "",
       productUrl: item.product_url || "",
       price: parsePrice(item.price),
       rawPrice: item.price,
       size: item.size || "",
-      dimensions: {
-        width: Number(item.width) || 0,
-        depth: Number(item.depth) || 0,
-        height: Number(item.height) || 0,
-      },
+      dimensions,
       centerY: 0,
     };
     return pivot;
@@ -2651,23 +2774,6 @@
     }
   }
 
-  function applyFurnitureColorToModel(root, color) {
-    const hex = furnitureColorHex(color);
-    root.traverse((obj) => {
-      if (!obj.isMesh || !obj.material) return;
-      obj.material = Array.isArray(obj.material)
-        ? obj.material.map((material) => cloneFurnitureMaterial(material, hex))
-        : cloneFurnitureMaterial(obj.material, hex);
-    });
-  }
-
-  function cloneFurnitureMaterial(material, color) {
-    const cloned = material.clone();
-    if (cloned.color) cloned.color.setHex(color);
-    cloned.needsUpdate = true;
-    return cloned;
-  }
-
   function createCenteredFurniturePivot(model, item, renderMode) {
     const scaledBox = new THREE.Box3().setFromObject(model);
     const center = scaledBox.getCenter(new THREE.Vector3());
@@ -2675,7 +2781,6 @@
     const pivot = new THREE.Group();
     model.position.sub(center);
     pivot.add(model);
-    applyFurnitureColorToModel(pivot, item.color);
     pivot.name = item.product_name || "furniture";
     pivot.userData = {
       type: "furniture",
@@ -2685,17 +2790,13 @@
       label: item.label || item.product_name || "자재",
       category: item.category || "",
       color: normalizeColor(item.color),
-      modelPath: item.model_path || resolveModelPath(item),
+      modelPath: getExplicitModelPath(item) || resolveModelPath(item),
       imageUrl: item.image_url || "",
       productUrl: item.product_url || "",
       price: parsePrice(item.price),
       rawPrice: item.price,
       size: item.size || "",
-      dimensions: {
-        width: Number(item.width) || 0,
-        depth: Number(item.depth) || 0,
-        height: Number(item.height) || 0,
-      },
+      dimensions: getItemDimensions(item),
       centerY: center.y - minY,
     };
     pivot.traverse((obj) => {
@@ -3054,23 +3155,127 @@
     const totalEl = document.getElementById("estimate-total");
     const listEl = document.getElementById("estimate-list");
     const activeTheme = document.getElementById("active-theme");
-    const total = state.furnitureMeshes.reduce((sum, model) => sum + (model.userData.price || 0), 0);
+    const furnitureRows = getFurnitureEstimateRows();
+    const floorRows = getFloorEstimateRows();
+    const wallpaperRows = getWallpaperEstimateRows();
+    const rows = [...furnitureRows, ...floorRows, ...wallpaperRows];
+    const total = rows.reduce((sum, item) => sum + item.price, 0);
 
-    if (placedCount) placedCount.textContent = `${state.furnitureMeshes.length}개`;
+    if (placedCount) placedCount.textContent = `${rows.length}개`;
     if (totalEl) totalEl.textContent = formatPrice(total);
     if (activeTheme) activeTheme.textContent = state.activePattern;
     if (!listEl) return;
     listEl.innerHTML = "";
-    if (state.furnitureMeshes.length === 0) {
+    if (rows.length === 0) {
       listEl.innerHTML = '<div class="estimate-row"><strong>배치된 자재 없음</strong><span>카탈로그에서 선택하세요</span></div>';
       return;
     }
-    state.furnitureMeshes.forEach((model) => {
+    rows.forEach((item) => {
       const row = document.createElement("div");
       row.className = "estimate-row";
-      row.innerHTML = `<strong>${escapeHtml(model.userData.label)}</strong><b>${formatPrice(model.userData.price)}</b><span>${formatDimensions(model.userData.dimensions)}</span><span>${formatColorLabel(model.userData.color)}</span>`;
+      row.innerHTML = `<strong>${escapeHtml(item.label)}</strong><b>${formatPrice(item.price)}</b><span>${escapeHtml(item.detail)}</span>`;
       listEl.appendChild(row);
     });
+  }
+
+  function getFurnitureEstimateRows() {
+    return state.furnitureMeshes.map((model) => ({
+      type: "furniture",
+      label: model.userData.label,
+      category: model.userData.category || "-",
+      detail: formatDimensions(model.userData.dimensions),
+      price: model.userData.price || 0,
+    }));
+  }
+
+  function getFloorEstimateRows() {
+    if (!state.floorBounds || state.roomObjects.length === 0) return [];
+    const groups = new Map();
+    state.roomObjects.forEach((room) => {
+      const areaM2 = getRoomAreaM2(room);
+      if (areaM2 <= 0) return;
+      const material = getFloorMaterialByValue(room.userData.floorMaterial || state.activeFloorMaterial);
+      if (!material) return;
+      const unitPrice = parsePrice(material.price);
+      if (unitPrice <= 0) return;
+      const key = material.value;
+      const current = groups.get(key) || { material, areaM2: 0, roomCount: 0 };
+      current.areaM2 += areaM2;
+      current.roomCount += 1;
+      groups.set(key, current);
+    });
+
+    return Array.from(groups.values()).map((entry) => {
+      const unitPrice = parsePrice(entry.material.price);
+      return {
+        type: "floor",
+        label: `바닥재 - ${entry.material.label}`,
+        category: "바닥",
+        detail: `${formatArea(entry.areaM2)}㎡ × ${formatPrice(unitPrice)}/㎡ · ${entry.roomCount}개 공간`,
+        price: Math.round(entry.areaM2 * unitPrice),
+        areaM2: entry.areaM2,
+        unitPrice,
+      };
+    });
+  }
+
+  function getRoomAreaM2(room) {
+    if (!room || !room.userData || !room.userData.mask || !state.floorBounds) return 0;
+    const width = room.userData.maskWidth || 0;
+    const height = room.userData.maskHeight || 0;
+    if (width <= 0 || height <= 0) return 0;
+    const filledPixels = room.userData.mask.reduce((sum, value) => sum + (value ? 1 : 0), 0);
+    const pixelArea = (state.floorBounds.width / width) * (state.floorBounds.depth / height);
+    return filledPixels * pixelArea;
+  }
+
+  function getWallpaperEstimateRows() {
+    const groups = new Map();
+    state.wallObjects.forEach((wall) => {
+      if (!wall.userData || !wall.userData.wallpaperApplied) return;
+      const areaM2 = getWallWallpaperAreaM2(wall);
+      if (areaM2 <= 0) return;
+      const material = getWallMaterialByValue(wall.userData.wallMaterial || state.activeWallMaterial);
+      if (!material) return;
+      const rollPrice = parsePrice(material.price);
+      if (rollPrice <= 0) return;
+      const key = material.value;
+      const current = groups.get(key) || { material, areaM2: 0, wallCount: 0 };
+      current.areaM2 += areaM2;
+      current.wallCount += 1;
+      groups.set(key, current);
+    });
+
+    return Array.from(groups.values()).map((entry) => {
+      const rollAreaM2 = getWallpaperRollAreaM2(entry.material);
+      const rollCount = rollAreaM2 > 0 ? Math.max(1, Math.ceil(entry.areaM2 / rollAreaM2)) : 1;
+      const rollPrice = parsePrice(entry.material.price);
+      return {
+        type: "wallpaper",
+        label: `벽지 - ${entry.material.label}`,
+        category: "벽지",
+        detail: `${formatArea(entry.areaM2)}㎡ / ${formatArea(rollAreaM2)}㎡(1롤) × ${rollCount}롤 · ${entry.wallCount}개 벽`,
+        price: rollCount * rollPrice,
+        areaM2: entry.areaM2,
+        rollAreaM2,
+        rollCount,
+        unitPrice: rollPrice,
+      };
+    });
+  }
+
+  function getWallWallpaperAreaM2(wall) {
+    const params = wall.geometry && wall.geometry.parameters;
+    if (!params) return 0;
+    const length = Number(params.width) || 0;
+    const height = Number(wall.userData.renderHeight) || 2.4;
+    return Math.max(0, length * height);
+  }
+
+  function getWallpaperRollAreaM2(material) {
+    const widthM = (Number(material.widthMm) || 0) * 0.001;
+    const lengthM = Number(material.lengthM) || 0;
+    return Math.max(0, widthM * lengthM);
   }
 
   function applyTrendPattern(pattern) {
@@ -3079,18 +3284,17 @@
     clearFurniture();
     state.suppressAutoSelect = true;
     const picks = pattern.placements.map((placement) => {
-      return findCatalogItem(placement.category, pattern.color) || findCatalogItem(placement.category) || state.catalogItems[0];
+      return findCatalogItem(placement.category) || state.catalogItems[0];
     }).filter(Boolean);
     picks.forEach((item, index) => spawnFurniture(item, { ...pattern.placements[index], select: false }));
     state.suppressAutoSelect = false;
     updateSceneStatus("추천 패턴 적용", `${pattern.code} ${pattern.name} 기본 배치를 불러왔습니다.`);
   }
 
-  function findCatalogItem(category, color) {
+  function findCatalogItem(category) {
     return state.catalogItems.find((item) => {
       const categoryOk = !category || String(item.category || "").includes(category) || String(item.product_name || "").includes(category);
-      const colorOk = !color || normalizeColor(item.color) === color;
-      return categoryOk && colorOk;
+      return categoryOk;
     });
   }
 
@@ -3103,6 +3307,7 @@
     });
     state.furnitureMeshes = [];
     state.selectedFurniture = null;
+    state.selectedRenderedFurniture = null;
     clearVisualization();
     updateEstimate();
   }
@@ -3111,13 +3316,15 @@
     await show3DLayout();
   }
 
-  async function show3DLayout() {
+  async function show3DLayout(options) {
+    options = options || {};
     clearSelectionHighlight();
     state.selectedFurniture = null;
+    state.selectedRenderedFurniture = null;
     state.selectedWall = null;
     const toolbar = document.getElementById("furniture-toolbar");
     if (toolbar) toolbar.style.display = "none";
-    clearVisualization();
+    clearVisualization({ preserveMode: true });
     state.renderMode = "3d";
     updateRenderModeButtons();
     const bounds = calculateLayoutBounds();
@@ -3131,14 +3338,22 @@
     setPlanningWallsVisible(false);
     updateSceneStatus("3D 렌더링 중", "배치한 가구를 3D 모델로 변환하고 있습니다.");
     await addRenderedFurnitureModels(visualization);
-    focusCameraOnPlanContent(bounds.width, bounds.depth, bounds.center);
+    if (!options.preserveCamera) {
+      focusCameraOnPlanContent(bounds.width, bounds.depth, bounds.center);
+    }
     updateSafetyState();
     updateSceneStatus("3D 렌더링 완료", "벽체, 바닥, 배치 자재, 견적 상태가 갱신되었습니다.");
+  }
+
+  async function refresh3DVisualization() {
+    if (state.renderMode !== "3d") return;
+    await show3DLayout({ preserveCamera: true });
   }
 
   function show2DLayout() {
     clearSelectionHighlight();
     state.selectedFurniture = null;
+    state.selectedRenderedFurniture = null;
     state.selectedWall = null;
     const toolbar = document.getElementById("furniture-toolbar");
     if (toolbar) toolbar.style.display = "none";
@@ -3165,31 +3380,36 @@
 
   async function addRenderedFurnitureModel(group, planModel) {
     const item = exportCatalogLikeItem(planModel);
-    const paths = [item.model_path, resolveModelPath(item), "/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb"].filter(Boolean);
+    const paths = resolveModelPaths(item);
     const gltf = await loadGltfWithFallback(paths);
     if (!gltf) {
-      group.add(createRenderedFurnitureBox(planModel, item));
+      const fallback = createRenderedFurnitureBox(planModel, item);
+      fallback.userData.sourcePlanModel = planModel;
+      group.add(fallback);
       return;
     }
 
     const model = gltf.scene;
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3());
-    const targetW = Math.max((Number(item.width) || 150) * 0.01, 0.18);
-    const targetH = Math.max((Number(item.height) || 80) * 0.01, 0.18);
-    const targetD = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    const dimensions = getItemDimensions(item);
+    const targetW = Math.max((dimensions.width || 150) * 0.01, 0.18);
+    const targetH = Math.max((dimensions.height || 80) * 0.01, 0.18);
+    const targetD = Math.max((dimensions.depth || 80) * 0.01, 0.18);
     model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
 
     const pivot = createCenteredFurniturePivot(model, item);
     pivot.position.set(planModel.position.x, pivot.userData.centerY || 0, planModel.position.z);
     pivot.rotation.y = planModel.rotation.y;
+    pivot.userData.sourcePlanModel = planModel;
     group.add(pivot);
   }
 
   function createRenderedFurnitureBox(planModel, item) {
-    const width = Math.max((Number(item.width) || 150) * 0.01, 0.18);
-    const height = Math.max((Number(item.height) || 80) * 0.01, 0.18);
-    const depth = Math.max((Number(item.depth) || 80) * 0.01, 0.18);
+    const dimensions = getItemDimensions(item);
+    const width = Math.max((dimensions.width || 150) * 0.01, 0.18);
+    const height = Math.max((dimensions.height || 80) * 0.01, 0.18);
+    const depth = Math.max((dimensions.depth || 80) * 0.01, 0.18);
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(width, height, depth),
       new THREE.MeshStandardMaterial({ color: furnitureColorHex(item.color), roughness: 0.76 })
@@ -3389,14 +3609,17 @@
     });
   }
 
-  function clearVisualization() {
+  function clearVisualization(options) {
+    options = options || {};
     if (!state.visualizationGroup) return;
     state.scene.remove(state.visualizationGroup);
     disposeObject3D(state.visualizationGroup);
     state.visualizationGroup = null;
     setPlanningFurnitureVisible(true);
     setPlanningWallsVisible(true);
-    state.renderMode = "2d";
+    if (!options.preserveMode) {
+      state.renderMode = "2d";
+    }
     updateRenderModeButtons();
   }
 
@@ -3470,15 +3693,15 @@
   }
 
   function downloadEstimatePdf() {
-    const rows = state.furnitureMeshes.map((model, index) => ({
+    const estimateRows = [...getFurnitureEstimateRows(), ...getFloorEstimateRows(), ...getWallpaperEstimateRows()];
+    const rows = estimateRows.map((item, index) => ({
       index: String(index + 1),
-      label: model.userData.label,
-      category: model.userData.category || "-",
-      dimensions: formatDimensions(model.userData.dimensions),
-      color: formatColorLabel(model.userData.color),
-      price: formatPrice(model.userData.price),
+      label: item.label,
+      category: item.category || "-",
+      dimensions: item.detail,
+      price: formatPrice(item.price),
     }));
-    const total = state.furnitureMeshes.reduce((sum, model) => sum + (model.userData.price || 0), 0);
+    const total = estimateRows.reduce((sum, item) => sum + item.price, 0);
     const html = createEstimatePrintHtml(rows, total);
     const printWindow = window.open("", "_blank", "width=900,height=700");
 
@@ -3506,11 +3729,10 @@
             <td>${escapeHtml(row.label)}</td>
             <td>${escapeHtml(row.category)}</td>
             <td>${escapeHtml(row.dimensions)}</td>
-            <td>${escapeHtml(row.color)}</td>
             <td class="price">${escapeHtml(row.price)}</td>
           </tr>
         `).join("")
-      : `<tr><td colspan="6" class="empty">배치된 자재가 없습니다.</td></tr>`;
+      : `<tr><td colspan="5" class="empty">배치된 자재가 없습니다.</td></tr>`;
 
     return `<!DOCTYPE html>
 <html lang="ko">
@@ -3551,8 +3773,7 @@
         <th>No.</th>
         <th>자재명</th>
         <th>분류</th>
-        <th>크기</th>
-        <th>색상</th>
+        <th>내용</th>
         <th class="price">금액</th>
       </tr>
     </thead>
@@ -3654,10 +3875,37 @@
   }
 
   function resolveModelPath(item) {
-    const color = normalizeColor(item.color);
-    const category = String(item.category || "").toLowerCase();
-    const name = String(item.product_name || item.name || "").toLowerCase();
-    const text = `${category} ${name}`;
+    const paths = resolveModelPaths(item);
+    return paths[0] || "";
+  }
+
+  function resolveModelPaths(item) {
+    const paths = [];
+    const explicitPath = getExplicitModelPath(item);
+    if (explicitPath) paths.push(explicitPath);
+
+    const defaultPath = resolveDefaultFixtureModelPath(item);
+    if (defaultPath) paths.push(defaultPath);
+
+    const categoryDir = resolveModelCategoryDir(item);
+    const modelName = sanitizeModelFileName(getItemName(item));
+    if (categoryDir && modelName) {
+      const categoryVariants = unique([categoryDir, categoryDir.normalize("NFD"), categoryDir.normalize("NFC")]);
+      const nameVariants = unique([modelName, modelName.normalize("NFD"), modelName.normalize("NFC")]);
+      categoryVariants.forEach((category) => {
+        nameVariants.forEach((name) => paths.push(`/static/models/${category}/${name}.glb`));
+      });
+    }
+
+    paths.push(...resolveCategoryModelFallbackPaths(item));
+    paths.push(...resolveLegacyModelFallbackPaths(item));
+    return unique(paths.filter(Boolean));
+  }
+
+  function resolveDefaultFixtureModelPath(item) {
+    const name = getItemName(item).toLowerCase();
+    const sizeText = getItemSizeDescription(item).toLowerCase();
+    const text = `${String(item.category || "").toLowerCase()} ${name} ${sizeText}`;
     if (text.includes("toilet") || text.includes("변기") || text.includes("양변기")) {
       return "/static/models/Default/toilet.glb";
     }
@@ -3666,52 +3914,148 @@
         ? "/static/models/Default/kitchen_sink.glb"
         : "/static/models/Default/sink.glb";
     }
+    return "";
+  }
+
+  function resolveModelCategoryDir(item) {
+    const category = String(item.category || "").trim();
+    const text = `${category} ${getItemName(item)} ${getItemSizeDescription(item)}`;
+    const normalizedText = text.toLowerCase();
+    if (category.includes("김치냉장고") || category.includes("냉장고") || text.includes("냉장고") || normalizedText.includes("refrigerator")) return "냉장고";
+    if (category.includes("소파") || normalizedText.includes("sofa")) return "소파";
+    if (category.includes("침대") || normalizedText.includes("bed")) return "침대";
+    if (category.includes("식탁")) return "식탁";
+    if (category.includes("책상") || normalizedText.includes("desk")) return "책상";
+    if (category.includes("의자") || normalizedText.includes("chair")) return "의자";
+    if (category.includes("수납장") || category.includes("책장") || category.includes("캐비닛")) return "수납장";
+    if (category.includes("서랍장")) return "서랍장";
+    if (category.includes("화장대")) return "화장대";
+    return category || "";
+  }
+
+  function resolveCategoryModelFallbackPaths(item) {
+    const categoryDir = resolveModelCategoryDir(item);
+    const variants = unique([categoryDir, categoryDir && categoryDir.normalize("NFD"), categoryDir && categoryDir.normalize("NFC")]);
+    const paths = [];
+
+    if (categoryDir === "냉장고") {
+      const names = [
+        "Samsung 냉장고 RB30D4051S9",
+        "Samsung Bespoke AI 냉장고 4도어 RM70F90R2D",
+        "Samsung Bespoke AI 하이브리드 4도어 키친핏 Max RM80H64S2A",
+        "쿠잉전자 레트로 미니 2도어 냉장고",
+        "레비오사 멀티 미니 냉장고 LEMR-400RF",
+      ];
+      variants.forEach((category) => {
+        names.forEach((name) => {
+          unique([name, name.normalize("NFD"), name.normalize("NFC")])
+            .forEach((variant) => paths.push(`/static/models/${category}/${variant}.glb`));
+        });
+      });
+    }
+
+    return paths;
+  }
+
+  function resolveLegacyModelFallbackPaths(item) {
+    const color = normalizeColor(item.color);
+    const category = String(item.category || "").toLowerCase();
+    const name = getItemName(item).toLowerCase();
+    const sizeText = getItemSizeDescription(item).toLowerCase();
+    const text = `${category} ${name} ${sizeText}`;
+    const paths = [];
+
     if (text.includes("table") || text.includes("desk") || text.includes("테이블") || text.includes("책상")) {
-      return "/static/models/table/wooden_table.glb";
+      paths.push("/static/models/table/wooden_table.glb");
     }
     if (text.includes("gaming") || text.includes("게이밍")) {
-      return color === "white"
+      paths.push(color === "white"
         ? "/static/models/gaming_chair/gaming_white_chair.glb"
-        : "/static/models/gaming_chair/gaming_black_chair.glb";
+        : "/static/models/gaming_chair/gaming_black_chair.glb");
     }
     if (text.includes("chair") || text.includes("의자")) {
-      return color === "gray"
+      paths.push(color === "gray"
         ? "/static/models/dining_chair/dining_grey_chair.glb"
-        : "/static/models/gaming_chair/gaming_black_chair.glb";
+        : "/static/models/gaming_chair/gaming_black_chair.glb");
     }
     if (category.includes("bed") || category.includes("침대")) {
-      const size = color === "black" || color === "white" ? "single" : "queen";
-      return `/static/models/bed/${size}_${color}_bed.glb`;
+      paths.push(`/static/models/bed/${inferBedModelSize(item)}_${color}_bed.glb`);
     }
-    if (text.includes("curve") || text.includes("커브") || color === "blue") return `/static/models/curve_sofa/${color}_curve_sofa.glb`;
-    return `/static/models/sofa/${color}_sofa.glb`;
+    if (category.includes("sofa") || category.includes("소파") || text.includes("sofa") || text.includes("소파")) {
+      paths.push(text.includes("curve") || text.includes("커브") || color === "blue"
+        ? `/static/models/curve_sofa/${color}_curve_sofa.glb`
+        : `/static/models/sofa/${color}_sofa.glb`);
+    }
+    paths.push("/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb");
+    return paths;
+  }
+
+  function sanitizeModelFileName(name) {
+    return String(name || "")
+      .replace(/[\\/:*?"<>|]/g, "_")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function getExplicitModelPath(item) {
+    return item.model_path || item.modelPath || "";
+  }
+
+  function getItemName(item) {
+    return String(item.product_name || item.productName || item.name || "").trim();
+  }
+
+  function getItemSizeDescription(item) {
+    return String(item.size || item.size_description || item.sizeDescription || "").trim();
+  }
+
+  function getItemDimensions(item) {
+    return {
+      width: pickNumber(item.width, item.width_cm, item.widthCm),
+      depth: pickNumber(item.depth, item.depth_cm, item.depthCm),
+      height: pickNumber(item.height, item.height_cm, item.heightCm),
+    };
+  }
+
+  function pickNumber() {
+    for (let i = 0; i < arguments.length; i += 1) {
+      const value = Number(arguments[i]);
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    return 0;
+  }
+
+  function inferBedModelSize(item) {
+    const text = `${getItemSizeDescription(item)} ${getItemName(item)}`.toLowerCase();
+    if (text.includes("queen") || text.includes("퀸")) return "queen";
+    if (text.includes("single") || text.includes("싱글") || text.includes("슈퍼싱글")) return "single";
+    const dimensions = getItemDimensions(item);
+    const shortSide = dimensions.width > 0 && dimensions.depth > 0
+      ? Math.min(dimensions.width, dimensions.depth)
+      : Math.max(dimensions.width, dimensions.depth);
+    return shortSide >= 135 ? "queen" : "single";
   }
 
   function normalizeColor(color) {
     return String(color || "gray").toLowerCase().replace("grey", "gray").trim();
   }
 
-  function formatColorLabel(color) {
-    const normalized = normalizeColor(color);
-    if (normalized === "all") return "All";
-    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
-  }
-
-  function getColorSwatch(color) {
-    const filter = COLOR_FILTERS.find((entry) => entry.value === normalizeColor(color));
-    return filter ? filter.swatch : "#9ca3af";
-  }
-
   function formatDimensions(item) {
-    const w = formatNumber(item.width);
-    const d = formatNumber(item.depth);
-    const h = formatNumber(item.height);
+    const dimensions = getItemDimensions(item);
+    const w = formatNumber(dimensions.width);
+    const d = formatNumber(dimensions.depth);
+    const h = formatNumber(dimensions.height);
     return `${w}x${d}x${h}cm`;
   }
 
   function formatNumber(value) {
     const num = Number(value) || 0;
     return Number.isInteger(num) ? String(num) : num.toFixed(1);
+  }
+
+  function formatArea(value) {
+    const num = Number(value) || 0;
+    return num.toFixed(2).replace(/\.?0+$/, "");
   }
 
   function parsePrice(value) {

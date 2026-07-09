@@ -299,12 +299,6 @@ main {
   font-size: 12px;
 }
 
-.segmented-control {
-  display: grid;
-  gap: 6px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
 .catalog-tabs,
 .category-filter {
   display: grid;
@@ -319,7 +313,6 @@ main {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.color-filter-btn,
 .catalog-tab-btn,
 .category-filter-btn {
   align-items: center;
@@ -337,7 +330,6 @@ main {
   padding: 7px;
 }
 
-.color-filter-btn.active,
 .catalog-tab-btn.active,
 .category-filter-btn.active {
   background: #eef6ff;

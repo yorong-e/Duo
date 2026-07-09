@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="258" height="42" viewBox="0 0 258 42" role="img" aria-labelledby="title">
+  <title id="title">Hyundai Engineering</title>
+  <rect width="258" height="42" fill="none"/>
+  <g fill="none" fill-rule="evenodd">
+    <path fill="#002C5F" d="M16.4 7.2h9.2l9.3 27.6h-8.2l-1.4-4.8h-8.7l-1.4 4.8H7.1L16.4 7.2Zm2 16.7h5.1l-2.5-8.8h-.1l-2.5 8.8Z"/>
+    <path fill="#0072CE" d="M39.4 7.2h7.4v10.4h8.5V7.2h7.4v27.6h-7.4V23.9h-8.5v10.9h-7.4V7.2Z"/>
+    <path fill="#002C5F" d="M73.9 7.2h7.8l10.2 15.6V7.2h7.1v27.6h-7.5L81 18.8v16h-7.1V7.2Z"/>
+    <path fill="#0072CE" d="M106.2 7.2h22.5v6.2h-7.6v21.4h-7.4V13.4h-7.5V7.2Z"/>
+    <path fill="#002C5F" d="M135.5 7.2h20.8v6h-13.5v4.7H155v5.6h-12.2v5.2h13.9v6.1h-21.2V7.2Z"/>
+    <path fill="#0072CE" d="M165.1 7.2h11.7c8.7 0 14.3 5 14.3 13.7 0 8.8-5.6 13.9-14.3 13.9h-11.7V7.2Zm11.2 21.4c4.8 0 7.2-2.6 7.2-7.7 0-5-2.4-7.5-7.2-7.5h-3.8v15.2h3.8Z"/>
+    <path fill="#002C5F" d="M199.4 7.2h20.8v6h-13.5v4.7h12.2v5.6h-12.2v5.2h13.9v6.1h-21.2V7.2Z"/>
+    <path fill="#0072CE" d="M228.7 7.2h7.8l10.2 15.6V7.2h7.1v27.6h-7.5l-10.5-16v16h-7.1V7.2Z"/>
+  </g>
+</svg>

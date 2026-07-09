@@ -15,6 +15,7 @@
   const WALL_MAGNET_OVERLAP_MARGIN = 0.35;
   const WALL_BUFFER = 0.04;
   const DEFAULT_WALL_COLOR = 0x111827;
+  const DEFAULT_WALL_OVERLAY_COLOR = "#111827";
   const PARTITION_WALL_MAX_THICKNESS_M = 0.2;
   const IMAGE_WALL_DARKNESS = 92;
   const IMAGE_WALL_ALPHA = 24;
@@ -37,8 +38,6 @@
     { value: "floor", label: "바닥" },
     { value: "wallpaper", label: "벽지" },
   ];
-
-  const ALL_FURNITURE_CATEGORY = "all";
 
   const FLOOR_MATERIALS = [
     { value: "oak", label: "세로형 마루 07", color: 0x8a5a3f, swatch: "linear-gradient(90deg, #6f432f 0 20%, #9c6b4d 20% 40%, #5f3828 40% 60%, #b6815c 60% 80%, #754934 80%)" },
@@ -118,6 +117,7 @@
     floorLockedToPlan: false,
     wallObjects: [],
     furnitureMeshes: [],
+    renderedFurnitureMeshes: [],
     selectedFurniture: null,
     selectedRenderedFurniture: null,
     selectedWall: null,
@@ -134,9 +134,11 @@
     floorMaterials: [],
     wallMaterials: [],
     activeCatalogSection: "furniture",
-    activeFurnitureCategory: ALL_FURNITURE_CATEGORY,
+    activeFurnitureCategory: "",
     activeFloorMaterial: "oak",
     activeWallMaterial: "white",
+    wallOverlayMaterial: "",
+    wallOverlayApplied: false,
     activePattern: "A",
     lastWarnings: [],
     blockedDragWarning: "",
@@ -181,8 +183,8 @@
     state.controls = new THREE.OrbitControls(state.camera, state.renderer.domElement);
     state.controls.enableDamping = true;
 
-    state.scene.add(new THREE.AmbientLight(0xffffff, 0.82));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.72);
+    state.scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
     dirLight.position.set(6, 10, 8);
     dirLight.castShadow = true;
     state.scene.add(dirLight);
@@ -255,8 +257,8 @@
       handleWallDrawingClick();
       return;
     }
-    if (state.renderMode === "3d" && state.visualizationGroup) {
-      const renderedHits = raycaster.intersectObjects(state.visualizationGroup.children, true);
+    if (state.renderMode === "3d" && state.renderedFurnitureMeshes.length > 0) {
+      const renderedHits = raycaster.intersectObjects(state.renderedFurnitureMeshes, true);
       const renderedFurniture = renderedHits
         .map((hit) => findRenderedFurnitureRoot(hit.object))
         .find(Boolean);
@@ -409,8 +411,9 @@
 
   function findRenderedFurnitureRoot(object) {
     let current = object;
-    while (current && current !== state.visualizationGroup) {
+    while (current) {
       if (current.userData && current.userData.sourcePlanModel) return current;
+      if (current === state.visualizationGroup || current === state.scene) return null;
       current = current.parent;
     }
     return null;
@@ -1274,6 +1277,7 @@
         count: metrics.count,
         bbox: metrics.bbox,
         floorMaterial: state.activeFloorMaterial,
+        floorMaterialApplied: false,
         wallMaterial: state.activeWallMaterial,
       }],
     };
@@ -1309,6 +1313,7 @@
         count: metrics.count,
         bbox: metrics.bbox,
         floorMaterial: state.activeFloorMaterial,
+        floorMaterialApplied: false,
         wallMaterial: state.activeWallMaterial,
       });
     });
@@ -1380,6 +1385,7 @@
     const previousRooms = state.roomObjects.map((room) => ({
       center: room.userData.center,
       floorMaterial: room.userData.floorMaterial,
+      floorMaterialApplied: room.userData.floorMaterialApplied,
       wallMaterial: room.userData.wallMaterial,
     }));
     clearRoomFloors();
@@ -1391,6 +1397,7 @@
       const previous = previousRooms.find((entry) => entry.center && pointInRoomMask(entry.center.x, entry.center.z, room, roomData));
       if (previous) {
         room.floorMaterial = previous.floorMaterial;
+        room.floorMaterialApplied = previous.floorMaterialApplied;
         room.wallMaterial = previous.wallMaterial;
       }
     });
@@ -1485,6 +1492,7 @@
           count: queue.length,
           bbox: { minX, minY, maxX, maxY },
           floorMaterial: state.activeFloorMaterial,
+          floorMaterialApplied: false,
           wallMaterial: state.activeWallMaterial,
         });
       }
@@ -1506,6 +1514,7 @@
       count: mask.length,
       bbox: { minX: 0, minY: 0, maxX: roomData.width - 1, maxY: roomData.height - 1 },
       floorMaterial: state.activeFloorMaterial,
+      floorMaterialApplied: false,
       wallMaterial: state.activeWallMaterial,
     };
   }
@@ -1590,6 +1599,7 @@
       bbox: room.bbox,
       center: roomCenterToScene(room, roomData),
       floorMaterial: room.floorMaterial,
+      floorMaterialApplied: Boolean(room.floorMaterialApplied),
       wallMaterial: room.wallMaterial,
     };
     return mesh;
@@ -1793,7 +1803,7 @@
       mesh.renderOrder = 2;
       mesh.userData.type = "wallOverlay";
       group.add(mesh);
-      state.wallOverlay = { mesh, canvas, ctx, texture };
+      state.wallOverlay = { mesh, canvas, ctx, texture, originalImage: ctx.getImageData(0, 0, canvas.width, canvas.height) };
     };
     img.src = dataUri;
   }
@@ -2049,6 +2059,8 @@
     state.roomObjects = [];
     state.selectedRoomId = null;
     state.selectedWall = null;
+    state.wallOverlayMaterial = "";
+    state.wallOverlayApplied = false;
     clearVisualization();
     updateEstimate();
   }
@@ -2212,19 +2224,25 @@
 
   function getFurnitureCategoryFilters() {
     const categories = unique(state.catalogItems
-      .map((item) => String(item.category || "").trim())
+      .map((item) => normalizeFurnitureCategoryFilter(item.category))
       .filter(Boolean));
-    return [
-      { value: ALL_FURNITURE_CATEGORY, label: "전체" },
-      ...categories.map((category) => ({ value: category, label: category })),
-    ];
+    return categories.map((category) => ({ value: category, label: category }));
   }
 
   function ensureActiveFurnitureCategory() {
     const filters = getFurnitureCategoryFilters();
     if (!filters.some((filter) => filter.value === state.activeFurnitureCategory)) {
-      state.activeFurnitureCategory = ALL_FURNITURE_CATEGORY;
+      state.activeFurnitureCategory = filters.length > 0 ? filters[0].value : "";
     }
+  }
+
+  function normalizeFurnitureCategoryFilter(category) {
+    const value = String(category || "").trim();
+    const text = value.toLowerCase();
+    if (value.includes("김치냉장고") || value.includes("냉장고") || text.includes("refrigerator")) {
+      return "냉장고";
+    }
+    return value;
   }
 
   function renderTrendPatterns() {
@@ -2424,6 +2442,7 @@
       : state.roomObjects;
     targets.forEach((room) => {
       room.userData.floorMaterial = state.activeFloorMaterial;
+      room.userData.floorMaterialApplied = true;
     });
     refreshRoomFloorMaterials(targets);
     if (was3D) {
@@ -2531,6 +2550,103 @@
     return canvas;
   }
 
+  function repaintWallOverlayMaterial(value) {
+    if (!state.wallOverlay) return;
+    const material = getWallMaterialByValue(value);
+    const overlay = state.wallOverlay;
+    const canvas = overlay.canvas;
+    const ctx = overlay.ctx;
+    if (overlay.originalImage) {
+      ctx.putImageData(overlay.originalImage, 0, 0);
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    const mask = createWallOverlayMask(canvas);
+    if (!mask) return;
+    paintWallOverlayMask(ctx, canvas, mask, material);
+    overlay.texture.needsUpdate = true;
+  }
+
+  function createWallOverlayMask(canvas) {
+    if (state.imageWallMask && state.imageWallMask.width === canvas.width && state.imageWallMask.height === canvas.height) {
+      return state.imageWallMask.mask;
+    }
+
+    const source = state.wallOverlay.originalImage
+      ? state.wallOverlay.originalImage.data
+      : state.wallOverlay.ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const mask = new Uint8Array(canvas.width * canvas.height);
+    for (let i = 0, p = 0; i < source.length; i += 4, p += 1) {
+      if (source[i + 3] > 0 && (source[i] > 0 || source[i + 1] > 0 || source[i + 2] > 0)) {
+        mask[p] = 1;
+      }
+    }
+    return mask;
+  }
+
+  function paintWallOverlayMask(ctx, canvas, mask, material) {
+    const patternCanvas = material.imageUrl
+      ? null
+      : createWallPatternCanvas(material, 192, 192);
+    if (material.imageUrl) {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        paintWallOverlayMaskWithImage(ctx, canvas, mask, img);
+        state.wallOverlay.texture.needsUpdate = true;
+      };
+      img.onerror = () => paintWallOverlayMaskWithColor(ctx, canvas, mask, material.color);
+      img.src = material.imageUrl;
+      paintWallOverlayMaskWithColor(ctx, canvas, mask, material.color);
+      return;
+    }
+    paintWallOverlayMaskWithCanvas(ctx, canvas, mask, patternCanvas);
+  }
+
+  function paintWallOverlayMaskWithCanvas(ctx, canvas, mask, sourceCanvas) {
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = image.data;
+    const sourceCtx = sourceCanvas.getContext("2d");
+    const pattern = sourceCtx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height).data;
+    for (let y = 0; y < canvas.height; y += 1) {
+      for (let x = 0; x < canvas.width; x += 1) {
+        const p = y * canvas.width + x;
+        if (!mask[p]) continue;
+        const srcX = x % sourceCanvas.width;
+        const srcY = y % sourceCanvas.height;
+        const src = (srcY * sourceCanvas.width + srcX) * 4;
+        const dst = p * 4;
+        data[dst] = pattern[src];
+        data[dst + 1] = pattern[src + 1];
+        data[dst + 2] = pattern[src + 2];
+        data[dst + 3] = 255;
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+  }
+
+  function paintWallOverlayMaskWithImage(ctx, canvas, mask, img) {
+    const patternCanvas = document.createElement("canvas");
+    patternCanvas.width = Math.max(1, img.naturalWidth || img.width);
+    patternCanvas.height = Math.max(1, img.naturalHeight || img.height);
+    const patternCtx = patternCanvas.getContext("2d");
+    patternCtx.drawImage(img, 0, 0, patternCanvas.width, patternCanvas.height);
+    paintWallOverlayMaskWithCanvas(ctx, canvas, mask, patternCanvas);
+  }
+
+  function paintWallOverlayMaskWithColor(ctx, canvas, mask, color) {
+    const hex = `#${(color || DEFAULT_WALL_COLOR).toString(16).padStart(6, "0")}`;
+    ctx.save();
+    ctx.fillStyle = hex || DEFAULT_WALL_OVERLAY_COLOR;
+    for (let y = 0; y < canvas.height; y += 1) {
+      for (let x = 0; x < canvas.width; x += 1) {
+        if (mask[y * canvas.width + x]) ctx.fillRect(x, y, 1, 1);
+      }
+    }
+    ctx.restore();
+  }
+
   async function applyWallMaterial() {
     const was3D = state.renderMode === "3d";
     const active = getActiveWallMaterial();
@@ -2548,6 +2664,9 @@
         room.userData.wallMaterial = state.activeWallMaterial;
       }
     });
+    repaintWallOverlayMaterial(state.activeWallMaterial);
+    state.wallOverlayMaterial = state.activeWallMaterial;
+    state.wallOverlayApplied = true;
     if (was3D) {
       await refresh3DVisualization();
     } else {
@@ -2609,8 +2728,8 @@
   }
 
   function furnitureCategoryMatches(item, filterValue) {
-    if (filterValue === ALL_FURNITURE_CATEGORY) return true;
-    return String(item.category || "").trim() === filterValue;
+    if (!filterValue) return true;
+    return normalizeFurnitureCategoryFilter(item.category) === filterValue;
   }
 
   function createFurnitureCard(item) {
@@ -2850,6 +2969,15 @@
       messages.push("벽면 자석 스냅");
     }
 
+    model.position.copy(position);
+    box = getPlanBox(model);
+    const imageWallSnap = findNearestImageWallSnap(box);
+    if (imageWallSnap) {
+      position.x += imageWallSnap.dx;
+      position.z += imageWallSnap.dz;
+      messages.push("이미지 벽면 자석 스냅");
+    }
+
     model.position.copy(original);
     return { position, message: messages.join(", ") };
   }
@@ -2857,20 +2985,99 @@
   function findNearestWallSnap(modelBox) {
     let best = null;
     state.wallObjects.forEach((wall) => {
-      const wallBox = getPlanBox(wall);
-      const zOverlap = rangesOverlap(modelBox.minZ, modelBox.maxZ, wallBox.minZ, wallBox.maxZ, WALL_MAGNET_OVERLAP_MARGIN);
-      const xOverlap = rangesOverlap(modelBox.minX, modelBox.maxX, wallBox.minX, wallBox.maxX, WALL_MAGNET_OVERLAP_MARGIN);
-      considerWallSnap(wallBox.minX - modelBox.maxX, wallBox.minX - WALL_BUFFER - modelBox.maxX, 0, zOverlap);
-      considerWallSnap(modelBox.minX - wallBox.maxX, wallBox.maxX + WALL_BUFFER - modelBox.minX, 0, zOverlap);
-      considerWallSnap(wallBox.minZ - modelBox.maxZ, 0, wallBox.minZ - WALL_BUFFER - modelBox.maxZ, xOverlap);
-      considerWallSnap(modelBox.minZ - wallBox.maxZ, 0, wallBox.maxZ + WALL_BUFFER - modelBox.minZ, xOverlap);
+      const orientedSnap = getOrientedWallSnap(modelBox, wall);
+      if (orientedSnap) considerSnap(orientedSnap);
     });
     return best;
 
-    function considerWallSnap(gap, dx, dz, overlapsAlongWall) {
-      if (!overlapsAlongWall || gap < 0 || gap > WALL_MAGNET_DISTANCE) return;
-      if (!best || gap < best.gap) best = { gap, dx, dz };
+    function considerSnap(snap) {
+      if (!snap || snap.gap < 0 || snap.gap > WALL_MAGNET_DISTANCE) return;
+      if (!best || snap.gap < best.gap) best = snap;
     }
+  }
+
+  function getOrientedWallSnap(modelBox, wall) {
+    const params = wall.geometry && wall.geometry.parameters;
+    if (!params) return null;
+    const wallLength = Number(params.width) || 0;
+    const wallThickness = Number(params.depth) || 0;
+    if (wallLength <= 0 || wallThickness <= 0) return null;
+
+    const wallAngle = -(wall.rotation.y || 0);
+    const axis = { x: Math.cos(wallAngle), z: Math.sin(wallAngle) };
+    const normal = { x: -axis.z, z: axis.x };
+    const modelCenter = {
+      x: (modelBox.minX + modelBox.maxX) / 2,
+      z: (modelBox.minZ + modelBox.maxZ) / 2,
+    };
+    const modelHalfX = (modelBox.maxX - modelBox.minX) / 2;
+    const modelHalfZ = (modelBox.maxZ - modelBox.minZ) / 2;
+    const modelHalfAlong = Math.abs(axis.x) * modelHalfX + Math.abs(axis.z) * modelHalfZ;
+    const modelHalfNormal = Math.abs(normal.x) * modelHalfX + Math.abs(normal.z) * modelHalfZ;
+    const rel = {
+      x: modelCenter.x - wall.position.x,
+      z: modelCenter.z - wall.position.z,
+    };
+    const along = rel.x * axis.x + rel.z * axis.z;
+    const normalDistance = rel.x * normal.x + rel.z * normal.z;
+    const alongGap = Math.abs(along) - wallLength / 2 - modelHalfAlong;
+    if (alongGap > WALL_MAGNET_OVERLAP_MARGIN) return null;
+
+    const side = normalDistance >= 0 ? 1 : -1;
+    const gap = Math.abs(normalDistance) - wallThickness / 2 - modelHalfNormal;
+    if (gap < -WALL_BUFFER || gap > WALL_MAGNET_DISTANCE) return null;
+    const targetDistance = side * (wallThickness / 2 + modelHalfNormal + WALL_BUFFER);
+    const delta = targetDistance - normalDistance;
+    return {
+      gap: Math.max(0, gap),
+      dx: normal.x * delta,
+      dz: normal.z * delta,
+    };
+  }
+
+  function findNearestImageWallSnap(modelBox) {
+    if (!state.imageWallMask || !state.floorBounds) return null;
+    const mask = state.imageWallMask;
+    const center = {
+      x: (modelBox.minX + modelBox.maxX) / 2,
+      z: (modelBox.minZ + modelBox.maxZ) / 2,
+    };
+    const centerPixel = planPointToPixel(center.x, center.z, mask, state.floorBounds);
+    const maxRadius = Math.max(1, Math.round(WALL_MAGNET_DISTANCE / Math.max(state.floorBounds.width / mask.width, state.floorBounds.depth / mask.height)));
+    let best = null;
+    for (let radius = 1; radius <= maxRadius; radius += 1) {
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue;
+          const x = centerPixel.x + dx;
+          const y = centerPixel.y + dy;
+          if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) continue;
+          if (!mask.mask[y * mask.width + x]) continue;
+          const wallPoint = pixelToPlanPoint(x, y, mask, state.floorBounds);
+          const vx = center.x - wallPoint.x;
+          const vz = center.z - wallPoint.z;
+          const distance = Math.sqrt(vx * vx + vz * vz);
+          if (distance <= 0 || distance > WALL_MAGNET_DISTANCE) continue;
+          const nx = vx / distance;
+          const nz = vz / distance;
+          const modelHalfX = (modelBox.maxX - modelBox.minX) / 2;
+          const modelHalfZ = (modelBox.maxZ - modelBox.minZ) / 2;
+          const modelHalfTowardWall = Math.abs(nx) * modelHalfX + Math.abs(nz) * modelHalfZ;
+          const gap = distance - modelHalfTowardWall;
+          if (gap < -WALL_BUFFER || gap > WALL_MAGNET_DISTANCE) continue;
+          if (!best || Math.max(0, gap) < best.gap) {
+            const targetDistance = modelHalfTowardWall + WALL_BUFFER;
+            best = {
+              gap: Math.max(0, gap),
+              dx: wallPoint.x + nx * targetDistance - center.x,
+              dz: wallPoint.z + nz * targetDistance - center.z,
+            };
+          }
+        }
+      }
+      if (best) return best;
+    }
+    return null;
   }
 
   function rangesOverlap(aMin, aMax, bMin, bMax, margin) {
@@ -2950,6 +3157,13 @@
     return {
       x: clamp(Math.round(((x - bounds.minX) / bounds.width) * (mask.width - 1)), 0, mask.width - 1),
       y: clamp(Math.round(((z - bounds.minZ) / bounds.depth) * (mask.height - 1)), 0, mask.height - 1),
+    };
+  }
+
+  function pixelToPlanPoint(x, y, mask, bounds) {
+    return {
+      x: bounds.minX + (x / Math.max(mask.width - 1, 1)) * bounds.width,
+      z: bounds.minZ + (y / Math.max(mask.height - 1, 1)) * bounds.depth,
     };
   }
 
@@ -3192,6 +3406,7 @@
     if (!state.floorBounds || state.roomObjects.length === 0) return [];
     const groups = new Map();
     state.roomObjects.forEach((room) => {
+      if (!room.userData.floorMaterialApplied) return;
       const areaM2 = getRoomAreaM2(room);
       if (areaM2 <= 0) return;
       const material = getFloorMaterialByValue(room.userData.floorMaterial || state.activeFloorMaterial);
@@ -3330,6 +3545,7 @@
     const bounds = calculateLayoutBounds();
     const visualization = new THREE.Group();
     visualization.name = "acceptedLayoutVisualization";
+    state.renderedFurnitureMeshes = [];
     addRenderedRoomFloors(visualization);
     addRenderedWalls(visualization);
     state.scene.add(visualization);
@@ -3385,6 +3601,7 @@
     if (!gltf) {
       const fallback = createRenderedFurnitureBox(planModel, item);
       fallback.userData.sourcePlanModel = planModel;
+      state.renderedFurnitureMeshes.push(fallback);
       group.add(fallback);
       return;
     }
@@ -3402,6 +3619,7 @@
     pivot.position.set(planModel.position.x, pivot.userData.centerY || 0, planModel.position.z);
     pivot.rotation.y = planModel.rotation.y;
     pivot.userData.sourcePlanModel = planModel;
+    state.renderedFurnitureMeshes.push(pivot);
     group.add(pivot);
   }
 
@@ -3530,7 +3748,7 @@
     geometry.computeBoundingSphere();
     const mesh = new THREE.Mesh(geometry, [
       createWallCoreMaterial(),
-      createWallSideMaterial(state.activeWallMaterial),
+      createWallSideMaterial(state.wallOverlayApplied ? state.wallOverlayMaterial || state.activeWallMaterial : state.activeWallMaterial),
     ]);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -3615,6 +3833,7 @@
     state.scene.remove(state.visualizationGroup);
     disposeObject3D(state.visualizationGroup);
     state.visualizationGroup = null;
+    state.renderedFurnitureMeshes = [];
     setPlanningFurnitureVisible(true);
     setPlanningWallsVisible(true);
     if (!options.preserveMode) {

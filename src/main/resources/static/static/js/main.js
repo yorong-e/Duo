@@ -30,7 +30,10 @@
   const ROOM_GAP_TOLERANCE_STEPS = [0.5, 1.0, 1.6, 2.4];
   const FLOOR_SEAM_MARGIN = 0;
   const FLOOR_SIMPLIFY_TOLERANCE = 0.025;
-  const FLOOR_MASK_TARGET_WIDTH = 1024;
+  // 방별 바닥 텍스처/마스크의 작업 해상도다. 1024px은 방 수만큼 대형
+  // Uint8Array와 Canvas를 생성해 로딩이 길어졌고, 640px에서도 2D 편집과
+  // 면적 계산에 충분한 정밀도를 유지한다.
+  const FLOOR_MASK_TARGET_WIDTH = 640;
   const RENDERED_WALL_HEIGHT_RATIO = 0.6;
 
   const DETECTION_LABEL_MAP = {
@@ -41,6 +44,7 @@
     shower: "shower", shower_booth: "shower", showerbooth: "shower",
     "샤워": "shower", "샤워부스": "shower",
     kitchen_sink: "kitchen_sink", kitchensink: "kitchen_sink", "싱크대": "kitchen_sink",
+    bathroom_sink: "washbasin", range: "stove", dishwasher: "dishwasher", "식기세척기": "dishwasher",
     sink: "sink",
     stove: "stove", cooktop: "stove", gas_range: "stove", gasrange: "stove",
     induction: "stove", "가스레인지": "stove", "인덕션": "stove",
@@ -50,7 +54,7 @@
   };
 
   const BATHROOM_DETECTION_SCORE = { toilet: 12, bathtub: 10, shower: 9, washbasin: 5, sink: 1 };
-  const KITCHEN_DETECTION_SCORE = { kitchen_sink: 10, stove: 10, counter: 6, oven: 6, refrigerator: 4, sink: 2 };
+  const KITCHEN_DETECTION_SCORE = { kitchen_sink: 10, stove: 10, counter: 6, oven: 6, dishwasher: 5, refrigerator: 4, sink: 2 };
   const ROOM_TYPE_LABELS = { kitchen: "주방", bathroom: "화장실", unknown: "미분류" };
 
   const CATALOG_SECTIONS = [
@@ -746,6 +750,14 @@
     return `${value}B`;
   }
 
+  // ========================================================================
+  // 평면도 로딩 파이프라인
+  //
+  // 업로드 JSON → Spring/Python 변환 → 아래 loadFloorPlan()으로 돌아온다.
+  // 새 서버 응답은 editable_floorplan 형식이므로 원본 base64 이미지를 다시
+  // 탐색하지 않고 벽 마스크와 벡터 폴리곤만으로 장면을 재구성한다.
+  // ========================================================================
+
   function loadFloorPlan(planData) {
     if (isEditableFloorPlan(planData)) {
       loadReconstructedFloorPlan(planData);
@@ -1082,7 +1094,12 @@
   }
 
   function loadReconstructedFloorPlan(planData) {
+    // 좌표계 규칙:
+    // - 서버의 walls/floors/rooms/detections는 원본 이미지 픽셀 좌표다.
+    // - Three.js 장면에서는 이미지 중심이 (0, 0), 세로 픽셀이 z축이 된다.
+    // - 모든 변환은 imageTransform과 floorBounds를 통해 한 번만 수행한다.
     clearFloorPlan();
+    const loadVersion = state.floorPlanVersion;
     const attrs = getFloorPlanPixelSize(planData);
     const scale = FLOOR_PLAN_PIXEL_TO_SCENE;
     const planeW = attrs.width * scale;
@@ -1101,17 +1118,19 @@
       toScenePoint: (point) => ({ x: point.x * scale - planeW / 2, z: point.y * scale - planeH / 2 }),
     };
 
-    addWallMaskOverlay(group, planData, planeW, planeH);
+    // 표시용 벽과 충돌용 벽은 같은 축소 wall_mask를 공유한다. 표시 레이어는
+    // CanvasTexture, 충돌 레이어는 Uint8Array+적분 배열로 각각 변환된다.
+    loadWallMaskAssets(group, planData, planeW, planeH, loadVersion);
     addEditableWallRegionsToGroup(group, planData, imageTransform);
     state.scene.add(group);
     state.floorPlanGroup = group;
     setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
     state.wallRenderRects = normalizeWallRenderRects(planData.wall_render_rects);
-    loadWallCollisionMaskFromPlan(planData);
+    // 가장 정보가 풍부한 rooms를 우선한다. rooms가 없을 때만 전체 floor
+    // footprint 또는 브라우저 벽 flood-fill로 순차 폴백한다.
     const usedExtractedRooms = loadExtractedRoomsFromPlan(planData, attrs);
     const usedExtractedFootprint = !usedExtractedRooms && loadExtractedFloorFootprintFromPlan(planData, attrs);
     if (!usedExtractedRooms && !usedExtractedFootprint) rebuildRoomsFromWalls();
-    const loadVersion = state.floorPlanVersion;
     void classifyRoomsAndPlaceDetectedFixtures(planData, attrs, loadVersion);
     focusCameraOnPlanContent(planeW, planeH, new THREE.Vector3(0, 0, 0));
     updateSceneStatus(
@@ -1360,9 +1379,21 @@
     return true;
   }
 
+  // ========================================================================
+  // 설비 탐지 → 공간 분류 → 기본 GLB 자동 배치
+  // ========================================================================
+
+  /**
+   * 서버 detections의 bbox 중심을 방 마스크에 소속시킨 뒤 공간을 분류한다.
+   * 분류가 끝난 후에 fixture 후보를 만들기 때문에 모호한 "sink"도 해당 방이
+   * 주방이면 kitchen_sink, 그 외에는 washbasin으로 결정할 수 있다.
+   *
+   * loadVersion은 비동기 GLB 로딩 도중 다른 평면도가 업로드됐을 때 이전
+   * 모델이 새 장면에 뒤늦게 추가되는 경쟁 상태를 막는다.
+   */
   async function classifyRoomsAndPlaceDetectedFixtures(planData, attrs, loadVersion) {
     const detections = extractPlanDetections(planData, attrs);
-    if (detections.length === 0 || state.roomObjects.length === 0 || !state.floorBounds) return;
+    if (state.roomObjects.length === 0 || !state.floorBounds) return;
 
     clearRoomTypeLabels();
     const objectsByRoom = new Map(state.roomObjects.map((room) => [room.userData.id, []]));
@@ -1390,12 +1421,22 @@
       }
     });
 
-    const fixtures = detections.filter((detection) => (
+    const fixtureCandidates = detections.filter((detection) => detection.room && (
       detection.label === "toilet"
       || detection.label === "washbasin"
       || detection.label === "sink"
       || detection.label === "kitchen_sink"
     ));
+    const fixturesByRoomAndType = new Map();
+    fixtureCandidates.forEach((detection) => {
+      const fixtureType = detection.label === "sink"
+        ? (detection.room.userData.roomType === "kitchen" ? "kitchen_sink" : "washbasin")
+        : detection.label;
+      const key = `${detection.room.userData.id}:${fixtureType}`;
+      const current = fixturesByRoomAndType.get(key);
+      if (!current || detection.confidence > current.confidence) fixturesByRoomAndType.set(key, detection);
+    });
+    const fixtures = Array.from(fixturesByRoomAndType.values());
     await Promise.allSettled(fixtures.map((detection, index) => (
       placeDetectedFixture(detection, attrs, index, loadVersion)
     )));
@@ -1403,6 +1444,15 @@
 
     updateSafetyState();
     updateEstimate();
+    const detectorMetadata = planData && planData.layers && planData.layers.object_detection;
+    if (detections.length === 0) {
+      const detectorError = detectorMetadata && detectorMetadata.error;
+      updateSceneStatus(
+        detectorError ? "설비 객체 탐지 실패" : "설비 객체 탐지 결과 없음",
+        detectorError || "평면도에서 싱크대, 세면대, 변기 등의 설비 심볼을 찾지 못했습니다."
+      );
+      return;
+    }
     const kitchenCount = state.roomObjects.filter((room) => room.userData.roomType === "kitchen").length;
     const bathroomCount = state.roomObjects.filter((room) => room.userData.roomType === "bathroom").length;
     updateSceneStatus(
@@ -1412,6 +1462,9 @@
   }
 
   function extractPlanDetections(planData, attrs) {
+    // 외부 탐지기마다 키 이름이 달라 label/name/class_name 및
+    // bbox/box/bounding_box를 재귀적으로 수용한다. layers에는 대형 base64
+    // 문자열이 있으므로 탐색에서 제외해 JSON 로딩 후 불필요한 순회를 막는다.
     const found = [];
     const seenNodes = new Set();
 
@@ -1460,6 +1513,8 @@
   }
 
   function normalizeDetectionBbox(rawBox, detection, attrs) {
+    // 내부 표준은 원본 픽셀 기준 [x1, y1, x2, y2]다. 0~1 정규화 bbox와
+    // 명시적인 xywh 형식도 여기서 한 번 변환해 이후 로직을 단순화한다.
     let x1;
     let y1;
     let x2;
@@ -1514,6 +1569,9 @@
   }
 
   function classifyDetectedRoom(roomDetections) {
+    // 객체별 기본 점수 + 신뢰도를 합산한 후, 변기/레인지처럼 공간 의미가
+    // 강한 조합 보너스와 반대 공간 감점을 적용한다. 점수 차가 작으면 억지로
+    // 분류하지 않고 unknown을 유지한다.
     let bathroomScore = 0;
     let kitchenScore = 0;
     const detectedObjects = roomDetections.map((object) => object.label);
@@ -1602,6 +1660,9 @@
   }
 
   async function placeDetectedFixture(detection, attrs, index, loadVersion) {
+    // 탐지 bbox 중심은 detection.scenePoint에서 이미 장면 좌표로 변환됐다.
+    // 일반 가구 배치의 벽 자석을 적용하면 탐지 위치가 변하므로 자동 설비는
+    // 해당 좌표에 직접 추가하고, 이후 사용자가 선택/이동할 수 있게 등록한다.
     const roomType = detection.room && detection.room.userData.roomType;
     const item = createDetectedFixtureItem(detection, roomType, attrs, index);
     const pivot = await createGLBFurniturePivot(item) || create2DFurniturePivot(item);
@@ -2099,16 +2160,53 @@
     classifyWallsByThickness();
   }
 
-  function addWallMaskOverlay(group, planData, planeW, planeH) {
-    const dataUri = getLayerDataUri(planData, "wall_transparent") || getLayerDataUri(planData, "wall_mask");
+  /**
+   * 하나의 wall_mask PNG 디코딩 결과로 표시용 CanvasTexture와 충돌용
+   * Uint8Array를 동시에 만든다. 예전에는 같은 base64 PNG를 Image 두 개로
+   * 각각 디코딩해 CPU와 메모리를 중복 사용했다.
+   */
+  function loadWallMaskAssets(group, planData, planeW, planeH, loadVersion) {
+    const transparentDataUri = getLayerDataUri(planData, "wall_transparent");
+    const maskDataUri = getLayerDataUri(planData, "wall_mask");
+    const dataUri = maskDataUri || transparentDataUri;
     if (!dataUri) return;
     const img = new Image();
     img.onload = () => {
+      if (loadVersion !== state.floorPlanVersion || !group.parent) return;
       const canvas = document.createElement("canvas");
       canvas.width = img.naturalWidth || img.width;
       canvas.height = img.naturalHeight || img.height;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(img, 0, 0);
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      const mask = new Uint8Array(canvas.width * canvas.height);
+      const wallColor = new THREE.Color(DEFAULT_WALL_COLOR);
+      const red = Math.round(wallColor.r * 255);
+      const green = Math.round(wallColor.g * 255);
+      const blue = Math.round(wallColor.b * 255);
+      for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+        // 새 wall_mask는 흰 픽셀이 벽이다. 구형 wall_transparent 응답은
+        // 알파 채널이 벽 마스크이므로 하위 호환을 위해 둘 다 지원한다.
+        const isWall = maskDataUri
+          ? data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0
+          : data[i + 3] > 0;
+        mask[p] = isWall ? 1 : 0;
+        data[i] = red;
+        data[i + 1] = green;
+        data[i + 2] = blue;
+        data[i + 3] = isWall ? 255 : 0;
+      }
+      ctx.putImageData(imageData, 0, 0);
+
+      state.imageWallMask = {
+        width: canvas.width,
+        height: canvas.height,
+        mask,
+        integral: buildMaskIntegral(mask, canvas.width, canvas.height),
+      };
+
       const texture = new THREE.CanvasTexture(canvas);
       texture.needsUpdate = true;
       const mesh = new THREE.Mesh(
@@ -2121,6 +2219,7 @@
       mesh.userData.type = "wallOverlay";
       group.add(mesh);
       state.wallOverlay = { mesh, canvas, ctx, texture, originalImage: ctx.getImageData(0, 0, canvas.width, canvas.height) };
+      updateSafetyState();
     };
     img.src = dataUri;
   }
@@ -2128,35 +2227,6 @@
   function getLayerDataUri(planData, key) {
     const value = planData && planData.layers && planData.layers[key];
     return typeof value === "string" && value.indexOf("data:image") === 0 ? value : null;
-  }
-
-  function loadWallCollisionMaskFromPlan(planData) {
-    const dataUri = getLayerDataUri(planData, "wall_mask");
-    state.imageWallMask = null;
-    if (!dataUri) return;
-    const img = new Image();
-    img.onload = () => {
-      const width = img.naturalWidth || img.width;
-      const height = img.naturalHeight || img.height;
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, width, height).data;
-      const mask = new Uint8Array(width * height);
-      for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
-        if (data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0) mask[p] = 1;
-      }
-      state.imageWallMask = {
-        width,
-        height,
-        mask,
-        integral: buildMaskIntegral(mask, width, height),
-      };
-      updateSafetyState();
-    };
-    img.src = dataUri;
   }
 
   function normalizeWallRenderRects(rectData) {
@@ -4480,8 +4550,10 @@
       });
     }
 
-    paths.push(...resolveCategoryModelFallbackPaths(item));
-    paths.push(...resolveLegacyModelFallbackPaths(item));
+    // 과거 table/, gaming_chair/, bed/, sofa/ 폴더용 fallback은 현재 저장소에
+    // 존재하지 않는다. 모든 항목 끝에 이 경로들을 붙이면 GLB 하나를 못 찾을
+    // 때마다 여러 404 요청을 순차 대기하므로 제거했다. 실제 한글 카테고리
+    // 폴더의 제품명과 default 설비 경로만 후보로 유지한다.
     return unique(paths.filter(Boolean));
   }
 
@@ -4514,63 +4586,6 @@
     if (category.includes("서랍장")) return "서랍장";
     if (category.includes("화장대")) return "화장대";
     return category || "";
-  }
-
-  function resolveCategoryModelFallbackPaths(item) {
-    const categoryDir = resolveModelCategoryDir(item);
-    const variants = unique([categoryDir, categoryDir && categoryDir.normalize("NFD"), categoryDir && categoryDir.normalize("NFC")]);
-    const paths = [];
-
-    if (categoryDir === "냉장고") {
-      const names = [
-        "Samsung 냉장고 RB30D4051S9",
-        "Samsung Bespoke AI 냉장고 4도어 RM70F90R2D",
-        "Samsung Bespoke AI 하이브리드 4도어 키친핏 Max RM80H64S2A",
-        "쿠잉전자 레트로 미니 2도어 냉장고",
-        "레비오사 멀티 미니 냉장고 LEMR-400RF",
-      ];
-      variants.forEach((category) => {
-        names.forEach((name) => {
-          unique([name, name.normalize("NFD"), name.normalize("NFC")])
-            .forEach((variant) => paths.push(`/static/models/${category}/${variant}.glb`));
-        });
-      });
-    }
-
-    return paths;
-  }
-
-  function resolveLegacyModelFallbackPaths(item) {
-    const color = normalizeColor(item.color);
-    const category = String(item.category || "").toLowerCase();
-    const name = getItemName(item).toLowerCase();
-    const sizeText = getItemSizeDescription(item).toLowerCase();
-    const text = `${category} ${name} ${sizeText}`;
-    const paths = [];
-
-    if (text.includes("table") || text.includes("desk") || text.includes("테이블") || text.includes("책상")) {
-      paths.push("/static/models/table/wooden_table.glb");
-    }
-    if (text.includes("gaming") || text.includes("게이밍")) {
-      paths.push(color === "white"
-        ? "/static/models/gaming_chair/gaming_white_chair.glb"
-        : "/static/models/gaming_chair/gaming_black_chair.glb");
-    }
-    if (text.includes("chair") || text.includes("의자")) {
-      paths.push(color === "gray"
-        ? "/static/models/dining_chair/dining_grey_chair.glb"
-        : "/static/models/gaming_chair/gaming_black_chair.glb");
-    }
-    if (category.includes("bed") || category.includes("침대")) {
-      paths.push(`/static/models/bed/${inferBedModelSize(item)}_${color}_bed.glb`);
-    }
-    if (category.includes("sofa") || category.includes("소파") || text.includes("sofa") || text.includes("소파")) {
-      paths.push(text.includes("curve") || text.includes("커브") || color === "blue"
-        ? `/static/models/curve_sofa/${color}_curve_sofa.glb`
-        : `/static/models/sofa/${color}_sofa.glb`);
-    }
-    paths.push("/static/models/sofa/gray_sofa.glb", "/static/models/sofa/grey_sofa.glb");
-    return paths;
   }
 
   function sanitizeModelFileName(name) {
@@ -4606,17 +4621,6 @@
       if (Number.isFinite(value) && value > 0) return value;
     }
     return 0;
-  }
-
-  function inferBedModelSize(item) {
-    const text = `${getItemSizeDescription(item)} ${getItemName(item)}`.toLowerCase();
-    if (text.includes("queen") || text.includes("퀸")) return "queen";
-    if (text.includes("single") || text.includes("싱글") || text.includes("슈퍼싱글")) return "single";
-    const dimensions = getItemDimensions(item);
-    const shortSide = dimensions.width > 0 && dimensions.depth > 0
-      ? Math.min(dimensions.width, dimensions.depth)
-      : Math.max(dimensions.width, dimensions.depth);
-    return shortSide >= 135 ? "queen" : "single";
   }
 
   function normalizeColor(color) {

@@ -4,22 +4,26 @@
 extract_walls.py와 extract_layers.py 결과를 사용해 앱에서 편집 가능한 평면도 JSON을 만든다.
 
 출력 JSON:
-  - image.href: 미리보기용 바닥 레이어 PNG
+  - image.@attributes: 원본 좌표계 크기
   - walls[]: 각 벽을 개별 선택/이동/회전/삭제할 수 있는 중심선 벡터
   - floors[]: 재구성 화면에 그릴 바닥 폴리곤
-  - layers: 원본/바닥/벽/마스크 레이어 메타데이터
+  - rooms[]: 공간 분류와 바닥 편집에 사용하는 방 폴리곤
+  - detections[]: 평면도 설비 탐지 bbox
+  - layers.wall_mask: 화면 표시와 충돌 판정에 함께 쓰는 축소 이진 마스크
 
 사용법:
-  python build_editable_floorplan.py input.json -o src/main/resources/static/static/floorplan.json
+  python build_editable_floorplan.py input.json -o editable-floorplan.json
   python build_editable_floorplan.py input.json --debug-dir out_layers
 """
 
 import argparse
 import base64
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
+import time
 from pathlib import Path
 
 import cv2
@@ -28,6 +32,7 @@ import numpy as np
 import extract_layers
 import extract_walls
 from floorplan_vectorizer import vectorize
+from floorplan_object_detector import detect_floorplan_objects
 
 
 DEFAULT_WALL_HEIGHT_MM = 2400
@@ -42,6 +47,7 @@ PLAN_COLOR_CHROMA_THRESH = 14
 PLAN_COLOR_BRIGHTNESS_MAX = 245
 PLAN_CLOSE_KERNEL = 55
 PLAN_DILATE_KERNEL = 3
+OUTPUT_WALL_MASK_MAX_DIM = 2048
 
 
 def encode_png_data_uri(img):
@@ -51,16 +57,42 @@ def encode_png_data_uri(img):
     return "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def resize_mask_for_client(mask, max_dimension=OUTPUT_WALL_MASK_MAX_DIM):
+    """브라우저 충돌 판정용 마스크를 필요한 해상도로만 전달한다.
+
+    원본 5K 마스크를 그대로 보내면 브라우저가 약 17M 픽셀의 적분 배열을
+    만들며 메모리와 JSON 파싱 시간이 급증한다. 충돌 검사는 장면 좌표로 다시
+    정규화하므로 긴 변 2048px이면 편집 정밀도를 유지하면서 메모리를 크게
+    줄일 수 있다. 이진 마스크이므로 보간은 INTER_NEAREST를 사용한다.
+    """
+    height, width = mask.shape[:2]
+    longest = max(width, height)
+    if longest <= max_dimension:
+        return mask
+    scale = max_dimension / float(longest)
+    return cv2.resize(
+        mask,
+        (max(1, round(width * scale)), max(1, round(height * scale))),
+        interpolation=cv2.INTER_NEAREST,
+    )
+
+
+def run_timed_object_detection(img, detector_model, detector_confidence):
+    """구조 분석과 병렬로 실행할 수 있도록 탐지 결과와 실행 시간을 묶는다."""
+    started_at = time.perf_counter()
+    detections, metadata = detect_floorplan_objects(
+        img,
+        model_path=detector_model,
+        confidence=detector_confidence,
+    )
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+    return detections, metadata, elapsed_ms
+
+
 def estimate_wall_thickness(mask):
     dist = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
     nz = dist[dist > 0]
     return float(np.percentile(nz, 90) * 2) if nz.size else 10.0
-
-
-def rgba_from_mask(img, mask):
-    dilated = cv2.dilate(mask, np.ones((3, 3), np.uint8))
-    b, g, r = cv2.split(img)
-    return cv2.merge([b, g, r, dilated])
 
 
 def raw_mask_overlay(img, wall_mask, floor_mask):
@@ -350,50 +382,77 @@ def wall_render_rects_from_mask(wall_mask):
     }
 
 
-def build_editable_payload(input_path, output_path=None, debug_dir=None):
+def build_editable_payload(
+        input_path,
+        output_path=None,
+        debug_dir=None,
+        detector_model=None,
+        detector_confidence=None):
+    started_at = time.perf_counter()
     img, src_json = extract_layers.load_image_from_json(str(input_path))
     height, width = img.shape[:2]
 
-    wall_mask = extract_walls.extract_wall_mask(img)
-    thickness = estimate_wall_thickness(wall_mask)
-    floor_mask = extract_plan_footprint_mask(img, wall_mask, thickness)
-    floor_only, floor_alpha = extract_layers.cut(img, floor_mask)
+    # 구조 분석(OpenCV)과 객체 탐지(PyTorch)는 같은 원본 이미지만 필요하고
+    # 서로 결과를 참조하지 않는다. 별도 스레드에서 동시에 시작하면 각각의
+    # C/C++ 연산이 GIL 밖에서 실행되어 전체 대기 시간을 줄일 수 있다.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="fixture-detector") as executor:
+        detection_future = executor.submit(
+            run_timed_object_detection,
+            img,
+            detector_model,
+            detector_confidence,
+        )
 
-    segments = vectorize(wall_mask, thickness, debug_dir=debug_dir)
-    walls = [
-        segment_to_wall(i, seg)
-        for i, seg in enumerate(sorted(segments, key=lambda s: -math.hypot(s[2] - s[0], s[3] - s[1])))
-    ]
-    editable_wall_regions = editable_wall_regions_from_segments(segments, wall_mask)
-    wall_render_rects = wall_render_rects_from_mask(wall_mask)
-    floors = components_to_polygons(floor_mask, extract_layers.FLOOR_MIN_AREA)
-    room_masks = split_floor_into_room_masks(img, floor_mask, wall_mask, thickness)
-    rooms = masks_to_polygons(
-        room_masks,
-        "room",
-        "room",
-        max(extract_layers.FLOOR_MIN_AREA, int(floor_mask.size * ROOM_MIN_AREA_RATIO)),
-    )
+        # 1) 구조 분석: 이후 모든 좌표는 원본 이미지 픽셀 좌표를 유지한다.
+        structure_started_at = time.perf_counter()
+        wall_mask = extract_walls.extract_wall_mask(img)
+        thickness = estimate_wall_thickness(wall_mask)
+        floor_mask = extract_plan_footprint_mask(img, wall_mask, thickness)
+
+        segments = vectorize(wall_mask, thickness, debug_dir=debug_dir)
+        walls = [
+            segment_to_wall(i, seg)
+            for i, seg in enumerate(sorted(segments, key=lambda s: -math.hypot(s[2] - s[0], s[3] - s[1])))
+        ]
+        editable_wall_regions = editable_wall_regions_from_segments(segments, wall_mask)
+        wall_render_rects = wall_render_rects_from_mask(wall_mask)
+        floors = components_to_polygons(floor_mask, extract_layers.FLOOR_MIN_AREA)
+        room_masks = split_floor_into_room_masks(img, floor_mask, wall_mask, thickness)
+        rooms = masks_to_polygons(
+            room_masks,
+            "room",
+            "room",
+            max(extract_layers.FLOOR_MIN_AREA, int(floor_mask.size * ROOM_MIN_AREA_RATIO)),
+        )
+        structure_ms = round((time.perf_counter() - structure_started_at) * 1000)
+
+        # 2) 설비 탐지: bbox는 구조 분석과 동일한 원본 픽셀 좌표다.
+        inferred_detections, detector_metadata, detection_ms = detection_future.result()
 
     payload = copy.deepcopy(src_json)
     source_image = payload.get("image") if isinstance(payload.get("image"), dict) else {}
     for detection_key in ("detections", "objects", "predictions", "annotations", "results"):
         if detection_key not in payload and detection_key in source_image:
             payload[detection_key] = copy.deepcopy(source_image[detection_key])
+    existing_detections = payload.get("detections")
+    if isinstance(existing_detections, list):
+        payload["detections"] = existing_detections + inferred_detections
+    else:
+        payload["detections"] = inferred_detections
     attrs = dict(payload.get("@attributes", {}))
     attrs["width"] = width
     attrs["height"] = height
     payload["@attributes"] = attrs
     payload["unit"] = "pixel"
-    payload["image"] = {
-        "@attributes": {"width": width, "height": height},
-        "href": encode_png_data_uri(floor_only),
-    }
+    # 편집 화면은 floors/rooms 폴리곤으로 바닥을 다시 그리므로 원본과 동일한
+    # 6MB 내외 floor PNG를 응답에 중복 포함하지 않는다.
+    payload["image"] = {"@attributes": {"width": width, "height": height}}
     payload["walls"] = walls
     payload["editable_wall_regions"] = editable_wall_regions
     payload["wall_render_rects"] = wall_render_rects
     payload["floors"] = floors
     payload["rooms"] = rooms
+    client_wall_mask = resize_mask_for_client(wall_mask)
     payload["layers"] = {
         "source": os.path.basename(str(input_path)),
         "mode": "editable_floorplan",
@@ -405,16 +464,21 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         "editable_wall_count": len(editable_wall_regions),
         "floor_count": len(floors),
         "room_count": len(rooms),
+        "object_detection": detector_metadata,
+        "processing_ms": {
+            "structure": structure_ms,
+            "object_detection": detection_ms,
+            "total": round((time.perf_counter() - started_at) * 1000),
+        },
         "estimated_wall_thickness_px": round(float(thickness), 1),
-        "wall_mask": encode_png_data_uri(wall_mask),
-        "floor_mask": encode_png_data_uri(floor_mask),
-        "wall_transparent": encode_png_data_uri(rgba_from_mask(img, wall_mask)),
-        "floor_transparent": encode_png_data_uri(cv2.merge([*cv2.split(img), floor_alpha])),
-        "wall_overlay": encode_png_data_uri(raw_mask_overlay(img, wall_mask, floor_mask)),
+        # 프런트가 실제로 사용하는 유일한 래스터 레이어다. 나머지 검증용
+        # 이미지는 --debug-dir 사용 시 파일로만 생성한다.
+        "wall_mask": encode_png_data_uri(client_wall_mask),
     }
 
     if debug_dir:
         Path(debug_dir).mkdir(parents=True, exist_ok=True)
+        floor_only, _floor_alpha = extract_layers.cut(img, floor_mask)
         cv2.imwrite(str(Path(debug_dir) / "walls_mask.png"), wall_mask)
         cv2.imwrite(str(Path(debug_dir) / "floor_mask.png"), floor_mask)
         cv2.imwrite(str(Path(debug_dir) / "floor_only.png"), floor_only)
@@ -430,9 +494,17 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         cv2.imwrite(str(Path(debug_dir) / "editable_overlay.png"),
                     raw_mask_overlay(img, wall_mask, floor_mask))
 
+    # PNG 인코딩과 디버그 산출까지 포함한 Python 처리 시간이다. 파일 쓰기와
+    # Spring의 JSON 직렬화/전송 시간은 서버 계층에서 별도로 발생한다.
+    payload["layers"]["processing_ms"]["total"] = round(
+        (time.perf_counter() - started_at) * 1000
+    )
+
     if output_path:
         with Path(output_path).open("w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+            # 브라우저가 읽는 API 산출물이므로 들여쓰기를 제거한다. 사람이
+            # 확인해야 할 때는 jq를 사용하고 전송/파싱 바이트 수를 우선 줄인다.
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
 
     return payload
 
@@ -442,14 +514,24 @@ def main():
     parser.add_argument("input", help="base64 PNG가 들어있는 입력 JSON")
     parser.add_argument("-o", "--output", default=None, help="출력 JSON 경로")
     parser.add_argument("--debug-dir", default=None, help="검증용 레이어 이미지 출력 폴더")
+    parser.add_argument("--detector-model", default=None, help="Ultralytics 평면도 객체 탐지 가중치")
+    parser.add_argument("--detector-confidence", type=float, default=None, help="객체 탐지 최소 신뢰도")
     args = parser.parse_args()
 
     out = args.output or str(Path(args.input).with_name(Path(args.input).stem + "_editable.json"))
-    payload = build_editable_payload(args.input, out, args.debug_dir)
+    payload = build_editable_payload(
+        args.input,
+        out,
+        args.debug_dir,
+        detector_model=args.detector_model,
+        detector_confidence=args.detector_confidence,
+    )
     print(f"완료: {out}")
     print(f"  walls: {len(payload['walls'])}")
     print(f"  floors: {len(payload['floors'])}")
     print(f"  rooms: {len(payload.get('rooms', []))}")
+    detection = payload.get("layers", {}).get("object_detection", {})
+    print(f"  detections: {detection.get('detection_count', 0)} ({detection.get('status', 'unknown')})")
 
 
 if __name__ == "__main__":

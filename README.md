@@ -55,21 +55,21 @@ DuO/
 │   │   │       └── CollisionService.java
 │   │   └── resources/
 │   │       ├── application.properties
-│   │       ├── furniture.csv
 │   │       ├── db/schema.sql
 │   │       └── static/
 │   │           ├── index.html
 │   │           └── static/
 │   │               ├── css/
 │   │               ├── js/
-│   │               ├── floorplan.json
 │   │               └── models/
 │   └── test/java/com/duo/app/DuoApplicationTests.java
 ├── build_editable_floorplan.py
 ├── extract_layers.py
 ├── extract_walls.py
 ├── floorplan_vectorizer.py
-└── core/
+├── floorplan_object_detector.py
+├── requirements-floorplan.txt
+└── weights/
 ```
 
 ## API
@@ -82,9 +82,31 @@ DuO/
 | `POST` | `/api/floorplans/collisions` | Validate vector footprints against walls/furniture on the backend |
 | `GET` | `/actuator/health` | Spring Boot health endpoint |
 
+## Floor-plan Fixture Detection
+
+The vectorization endpoint also runs the bundled Ultralytics floor-plan model
+at `weights/floorplan-fixtures.pt`. Detected kitchen sinks, bathroom sinks,
+toilets, showers, bathtubs, ranges, and refrigerators are returned in
+`detections[]`; the browser uses their bounding-box centers to classify rooms
+and place the matching default GLB fixtures.
+
+Install the Python inference dependencies in the interpreter configured by
+`floorplan.python.command`:
+
+```bash
+/opt/anaconda3/bin/python3 -m pip install -r requirements-floorplan.txt
+```
+
+The model path and confidence threshold can be overridden without code changes:
+
+```bash
+export FLOORPLAN_DETECTOR_MODEL=/absolute/path/to/custom-best.pt
+export FLOORPLAN_DETECTOR_CONFIDENCE=0.4
+```
+
 ## Database Configuration
 
-The app starts without MySQL and serves `src/main/resources/furniture.csv`.
+The app starts without MySQL and serves the built-in furniture fallback catalog.
 
 To use MySQL instead, provide Spring datasource environment variables before running:
 

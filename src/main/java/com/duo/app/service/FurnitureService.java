@@ -103,7 +103,7 @@ public class FurnitureService {
                 formatPrice(rs.getString("price_krw")),
                 "",
                 color,
-                normalizeModelPath(modelPath, category, color),
+                normalizeModelPath(modelPath),
                 "",
                 "",
                 rs.getDouble("width_mm") / 10.0,
@@ -160,22 +160,20 @@ public class FurnitureService {
     }
 
     private List<FurnitureItem> defaultFurnitureCatalog() {
+        // 저장소에 실제 존재하는 제품명/카테고리를 사용한다. modelPath는 비워
+        // 두고 브라우저가 NFC/NFD 파일명 변형을 포함해 정확한 GLB를 찾는다.
+        // 과거의 models/sofa, models/bed 경로는 존재하지 않아 404 대기를 만들었다.
         return List.of(
-                defaultItem("default-sofa-gray", "그레이 소파", "sofa", "790000", "3인", "gray",
-                        "/static/models/sofa/gray_sofa.glb", 210, 90, 80),
-                defaultItem("default-sofa-brown", "브라운 소파", "sofa", "820000", "3인", "brown",
-                        "/static/models/sofa/brown_sofa.glb", 210, 90, 80),
-                defaultItem("default-sofa-blue", "블루 커브 소파", "sofa", "890000", "3인", "blue",
-                        "/static/models/curve_sofa/blue_curve_sofa.glb", 220, 95, 78),
-                defaultItem("default-bed-white", "화이트 침대", "bed", "650000", "single", "white",
-                        "/static/models/bed/single_white_bed.glb", 110, 210, 85),
-                defaultItem("default-bed-black", "블랙 침대", "bed", "680000", "single", "black",
-                        "/static/models/bed/single_black_bed.glb", 110, 210, 85)
+                defaultItem("default-sofa-glostad", "GLOSTAD 글로스타드", "소파", "790000", "3인", "gray", 210, 90, 80),
+                defaultItem("default-sofa-kivik", "KIVIK 쉬비크", "소파", "820000", "3인", "brown", 210, 90, 80),
+                defaultItem("default-sofa-landskrona", "LANDSKRONA 란스크로나", "소파", "890000", "3인", "blue", 220, 95, 78),
+                defaultItem("default-bed-malm", "MALM 말름", "침대", "650000", "single", "white", 110, 210, 85),
+                defaultItem("default-bed-brimnes", "BRIMNES 브림네스", "침대", "680000", "single", "black", 110, 210, 85)
         );
     }
 
     private FurnitureItem defaultItem(String id, String name, String category, String price, String size,
-                                      String color, String modelPath, double width, double depth, double height) {
+                                      String color, double width, double depth, double height) {
         return new FurnitureItem(
                 id,
                 name,
@@ -183,7 +181,7 @@ public class FurnitureService {
                 price,
                 size,
                 color,
-                modelPath,
+                "",
                 "",
                 "",
                 width,
@@ -251,10 +249,10 @@ public class FurnitureService {
     }
 
     private String inferModelPath(CSVRecord record) {
-        return normalizeModelPath(null, record.get("카테고리"), inferColor(record));
+        return normalizeModelPath(null);
     }
 
-    private String normalizeModelPath(String modelPath, String category, String color) {
+    private String normalizeModelPath(String modelPath) {
         if (modelPath != null && !modelPath.isBlank()) {
             if (modelPath.startsWith("http://") || modelPath.startsWith("https://")) {
                 return modelPath;
@@ -262,19 +260,10 @@ public class FurnitureService {
             return modelPath.startsWith("/") ? modelPath : "/" + modelPath;
         }
 
-        String normalizedColor = normalizeColor(color);
-        String normalizedCategory = category == null ? "" : category.toLowerCase(Locale.ROOT);
-
-        if (normalizedCategory.contains("bed") || normalizedCategory.contains("침대")) {
-            String size = "black".equals(normalizedColor) || "white".equals(normalizedColor) ? "single" : "queen";
-            return "/static/models/bed/" + size + "_" + normalizedColor + "_bed.glb";
-        }
-
-        if ("blue".equals(normalizedColor)) {
-            return "/static/models/curve_sofa/blue_curve_sofa.glb";
-        }
-
-        return "/static/models/sofa/" + normalizedColor + "_sofa.glb";
+        // 모델 경로가 데이터에 없으면 존재하지 않는 파일명을 추측하지 않는다.
+        // 프런트의 resolveModelPaths()가 제품명과 실제 한글 카테고리 폴더를
+        // NFC/NFD 양쪽으로 조합하며, 실패하면 즉시 2D 박스로 폴백한다.
+        return "";
     }
 
     private String normalizeImageUrl(String imageUrl) {

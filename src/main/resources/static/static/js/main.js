@@ -33,6 +33,26 @@
   const FLOOR_MASK_TARGET_WIDTH = 1024;
   const RENDERED_WALL_HEIGHT_RATIO = 0.6;
 
+  const DETECTION_LABEL_MAP = {
+    toilet: "toilet", wc: "toilet", "변기": "toilet", "양변기": "toilet",
+    washbasin: "washbasin", wash_basin: "washbasin", basin: "washbasin",
+    lavatory: "washbasin", "세면대": "washbasin",
+    bathtub: "bathtub", bath: "bathtub", "욕조": "bathtub",
+    shower: "shower", shower_booth: "shower", showerbooth: "shower",
+    "샤워": "shower", "샤워부스": "shower",
+    kitchen_sink: "kitchen_sink", kitchensink: "kitchen_sink", "싱크대": "kitchen_sink",
+    sink: "sink",
+    stove: "stove", cooktop: "stove", gas_range: "stove", gasrange: "stove",
+    induction: "stove", "가스레인지": "stove", "인덕션": "stove",
+    counter: "counter", countertop: "counter", kitchen_counter: "counter", "조리대": "counter",
+    oven: "oven", "오븐": "oven",
+    refrigerator: "refrigerator", fridge: "refrigerator", "냉장고": "refrigerator",
+  };
+
+  const BATHROOM_DETECTION_SCORE = { toilet: 12, bathtub: 10, shower: 9, washbasin: 5, sink: 1 };
+  const KITCHEN_DETECTION_SCORE = { kitchen_sink: 10, stove: 10, counter: 6, oven: 6, refrigerator: 4, sink: 2 };
+  const ROOM_TYPE_LABELS = { kitchen: "주방", bathroom: "화장실", unknown: "미분류" };
+
   const CATALOG_SECTIONS = [
     { value: "furniture", label: "가구" },
     { value: "floor", label: "바닥" },
@@ -109,6 +129,7 @@
     floorObjects: [],
     baseFloorObjects: [],
     roomObjects: [],
+    roomLabelObjects: [],
     wallOverlay: null,
     selectedRoomId: null,
     imageFloorMask: null,
@@ -117,6 +138,7 @@
     floorLockedToPlan: false,
     wallObjects: [],
     furnitureMeshes: [],
+    detectedFixtureMeshes: [],
     renderedFurnitureMeshes: [],
     selectedFurniture: null,
     selectedRenderedFurniture: null,
@@ -143,6 +165,7 @@
     lastWarnings: [],
     blockedDragWarning: "",
     suppressAutoSelect: false,
+    floorPlanVersion: 0,
   };
 
   const gltfLoader = new THREE.GLTFLoader();
@@ -553,6 +576,7 @@
     state.scene.remove(model);
     disposeObject3D(model);
     state.furnitureMeshes = state.furnitureMeshes.filter((m) => m !== model);
+    state.detectedFixtureMeshes = state.detectedFixtureMeshes.filter((m) => m !== model);
     clearSelectionHighlight();
     if (state.selectedRenderedFurniture && state.selectedRenderedFurniture.parent) {
       state.selectedRenderedFurniture.parent.remove(state.selectedRenderedFurniture);
@@ -1084,15 +1108,19 @@
     setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
     state.wallRenderRects = normalizeWallRenderRects(planData.wall_render_rects);
     loadWallCollisionMaskFromPlan(planData);
-    const usedExtractedFootprint = loadExtractedFloorFootprintFromPlan(planData, attrs);
-    if (!usedExtractedFootprint) {
-      const usedExtractedRooms = loadExtractedRoomsFromPlan(planData, attrs);
-      if (!usedExtractedRooms) rebuildRoomsFromWalls();
-    }
+    const usedExtractedRooms = loadExtractedRoomsFromPlan(planData, attrs);
+    const usedExtractedFootprint = !usedExtractedRooms && loadExtractedFloorFootprintFromPlan(planData, attrs);
+    if (!usedExtractedRooms && !usedExtractedFootprint) rebuildRoomsFromWalls();
+    const loadVersion = state.floorPlanVersion;
+    void classifyRoomsAndPlaceDetectedFixtures(planData, attrs, loadVersion);
     focusCameraOnPlanContent(planeW, planeH, new THREE.Vector3(0, 0, 0));
     updateSceneStatus(
       "재구성 평면도 로드 완료",
-      usedExtractedFootprint ? "평면도 이미지 영역 전체를 바닥으로 인식합니다." : "벽으로 닫힌 내부 공간을 방 단위 바닥으로 인식합니다."
+      usedExtractedRooms
+        ? "벽으로 나뉜 공간을 방 단위로 인식하고 주방·화장실 객체를 배치합니다."
+        : usedExtractedFootprint
+          ? "평면도 이미지 영역 전체를 바닥으로 인식합니다."
+          : "벽으로 닫힌 내부 공간을 방 단위 바닥으로 인식합니다."
     );
     updateSafetyState();
   }
@@ -1332,6 +1360,294 @@
     return true;
   }
 
+  async function classifyRoomsAndPlaceDetectedFixtures(planData, attrs, loadVersion) {
+    const detections = extractPlanDetections(planData, attrs);
+    if (detections.length === 0 || state.roomObjects.length === 0 || !state.floorBounds) return;
+
+    clearRoomTypeLabels();
+    const objectsByRoom = new Map(state.roomObjects.map((room) => [room.userData.id, []]));
+    detections.forEach((detection) => {
+      const scenePoint = detectionCenterToScene(detection, attrs);
+      const room = getRoomAtScenePoint(scenePoint.x, scenePoint.z);
+      detection.scenePoint = scenePoint;
+      detection.room = room || null;
+      if (room) objectsByRoom.get(room.userData.id).push(detection);
+    });
+
+    state.roomObjects.forEach((room) => {
+      const roomDetections = objectsByRoom.get(room.userData.id) || [];
+      const classification = classifyDetectedRoom(roomDetections);
+      Object.assign(room.userData, {
+        roomType: classification.roomType,
+        bathroomScore: classification.bathroomScore,
+        kitchenScore: classification.kitchenScore,
+        detectedObjects: classification.detectedObjects,
+      });
+      const label = createRoomTypeLabel(room, classification.roomType);
+      if (label && state.floorPlanGroup) {
+        state.floorPlanGroup.add(label);
+        state.roomLabelObjects.push(label);
+      }
+    });
+
+    const fixtures = detections.filter((detection) => (
+      detection.label === "toilet"
+      || detection.label === "washbasin"
+      || detection.label === "sink"
+      || detection.label === "kitchen_sink"
+    ));
+    await Promise.allSettled(fixtures.map((detection, index) => (
+      placeDetectedFixture(detection, attrs, index, loadVersion)
+    )));
+    if (loadVersion !== state.floorPlanVersion) return;
+
+    updateSafetyState();
+    updateEstimate();
+    const kitchenCount = state.roomObjects.filter((room) => room.userData.roomType === "kitchen").length;
+    const bathroomCount = state.roomObjects.filter((room) => room.userData.roomType === "bathroom").length;
+    updateSceneStatus(
+      "공간 분류 및 설비 배치 완료",
+      `주방 ${kitchenCount}곳, 화장실 ${bathroomCount}곳을 구분하고 설비 ${fixtures.length}개를 탐지 위치에 배치했습니다.`
+    );
+  }
+
+  function extractPlanDetections(planData, attrs) {
+    const found = [];
+    const seenNodes = new Set();
+
+    function visit(node, depth) {
+      if (node == null || depth > 10 || typeof node !== "object" || seenNodes.has(node)) return;
+      seenNodes.add(node);
+      if (Array.isArray(node)) {
+        node.forEach((entry) => visit(entry, depth + 1));
+        return;
+      }
+
+      const labelValue = node.label || node.name || node.class_name || node.className || node.class || node.category;
+      const rawBox = node.bbox || node.box || node.bounding_box || node.boundingBox;
+      if (labelValue && (rawBox || hasInlineDetectionBox(node))) {
+        const bbox = normalizeDetectionBbox(rawBox || node, node, attrs);
+        if (bbox) {
+          const confidenceValue = node.confidence == null ? (node.score == null ? 1 : node.score) : node.confidence;
+          found.push({
+            label: normalizeDetectionLabel(labelValue),
+            confidence: clamp(Number(confidenceValue) || 0, 0, 1),
+            bbox,
+          });
+        }
+      }
+      Object.keys(node).forEach((key) => {
+        if (key === "href" || key === "layers" || key === "mask") return;
+        visit(node[key], depth + 1);
+      });
+    }
+
+    visit(planData, 0);
+    const uniqueDetections = new Map();
+    found.forEach((detection) => {
+      const b = detection.bbox;
+      const key = `${detection.label}:${b.map((value) => Math.round(value * 10) / 10).join(",")}`;
+      const current = uniqueDetections.get(key);
+      if (!current || detection.confidence > current.confidence) uniqueDetections.set(key, detection);
+    });
+    return Array.from(uniqueDetections.values());
+  }
+
+  function hasInlineDetectionBox(node) {
+    return (node.x1 != null && node.y1 != null && node.x2 != null && node.y2 != null)
+      || (node.xmin != null && node.ymin != null && node.xmax != null && node.ymax != null)
+      || (node.x != null && node.y != null && (node.width != null || node.w != null) && (node.height != null || node.h != null));
+  }
+
+  function normalizeDetectionBbox(rawBox, detection, attrs) {
+    let x1;
+    let y1;
+    let x2;
+    let y2;
+    if (Array.isArray(rawBox) && rawBox.length >= 4) {
+      const values = rawBox.slice(0, 4).map(Number);
+      const format = String(detection.bbox_format || detection.box_format || detection.format || "").toLowerCase();
+      [x1, y1] = values;
+      if (format.includes("xywh")) {
+        x2 = x1 + values[2];
+        y2 = y1 + values[3];
+      } else {
+        x2 = values[2];
+        y2 = values[3];
+      }
+    } else if (rawBox && typeof rawBox === "object") {
+      x1 = Number(rawBox.x1 == null ? (rawBox.xmin == null ? rawBox.x : rawBox.xmin) : rawBox.x1);
+      y1 = Number(rawBox.y1 == null ? (rawBox.ymin == null ? rawBox.y : rawBox.ymin) : rawBox.y1);
+      const explicitX2 = rawBox.x2 == null ? rawBox.xmax : rawBox.x2;
+      const explicitY2 = rawBox.y2 == null ? rawBox.ymax : rawBox.y2;
+      x2 = explicitX2 == null ? x1 + Number(rawBox.width == null ? rawBox.w : rawBox.width) : Number(explicitX2);
+      y2 = explicitY2 == null ? y1 + Number(rawBox.height == null ? rawBox.h : rawBox.height) : Number(explicitY2);
+    }
+    if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+
+    const normalized = Math.max(Math.abs(x1), Math.abs(y1), Math.abs(x2), Math.abs(y2)) <= 1.5;
+    if (normalized) {
+      x1 *= attrs.width;
+      x2 *= attrs.width;
+      y1 *= attrs.height;
+      y2 *= attrs.height;
+    }
+    const minX = clamp(Math.min(x1, x2), 0, attrs.width);
+    const minY = clamp(Math.min(y1, y2), 0, attrs.height);
+    const maxX = clamp(Math.max(x1, x2), 0, attrs.width);
+    const maxY = clamp(Math.max(y1, y2), 0, attrs.height);
+    if (maxX <= minX || maxY <= minY) return null;
+    return [minX, minY, maxX, maxY];
+  }
+
+  function normalizeDetectionLabel(label) {
+    const normalized = String(label == null ? "" : label).toLowerCase().trim();
+    return DETECTION_LABEL_MAP[normalized] || normalized;
+  }
+
+  function detectionCenterToScene(detection, attrs) {
+    const [x1, y1, x2, y2] = detection.bbox;
+    return {
+      x: state.floorBounds.minX + (((x1 + x2) / 2) / Math.max(attrs.width, 1)) * state.floorBounds.width,
+      z: state.floorBounds.minZ + (((y1 + y2) / 2) / Math.max(attrs.height, 1)) * state.floorBounds.depth,
+    };
+  }
+
+  function classifyDetectedRoom(roomDetections) {
+    let bathroomScore = 0;
+    let kitchenScore = 0;
+    const detectedObjects = roomDetections.map((object) => object.label);
+    roomDetections.forEach((object) => {
+      bathroomScore += (BATHROOM_DETECTION_SCORE[object.label] || 0) * object.confidence;
+      kitchenScore += (KITCHEN_DETECTION_SCORE[object.label] || 0) * object.confidence;
+    });
+    const labels = new Set(detectedObjects);
+
+    if (labels.has("toilet")) {
+      bathroomScore += 15;
+      if (labels.has("washbasin")) bathroomScore += 10;
+      if (labels.has("bathtub")) bathroomScore += 10;
+      if (labels.has("shower")) bathroomScore += 8;
+    }
+    if (labels.has("bathtub") && labels.has("washbasin")) bathroomScore += 8;
+    if (labels.has("shower") && labels.has("washbasin")) bathroomScore += 7;
+
+    const hasSink = labels.has("kitchen_sink") || labels.has("sink");
+    if (hasSink && labels.has("stove")) kitchenScore += 15;
+    if (hasSink && labels.has("counter")) kitchenScore += 10;
+    if (labels.has("stove") && labels.has("counter")) kitchenScore += 10;
+    if (hasSink && labels.has("oven")) kitchenScore += 7;
+
+    if (labels.has("toilet")) kitchenScore -= 20;
+    if (labels.has("bathtub")) kitchenScore -= 15;
+    if (labels.has("stove")) bathroomScore -= 20;
+    if (labels.has("oven")) bathroomScore -= 10;
+    bathroomScore = Math.max(bathroomScore, 0);
+    kitchenScore = Math.max(kitchenScore, 0);
+
+    let roomType = "unknown";
+    if (bathroomScore < 5 && kitchenScore < 5) roomType = "unknown";
+    else if (labels.has("toilet")) roomType = "bathroom";
+    else if (labels.has("stove") && kitchenScore > bathroomScore) roomType = "kitchen";
+    else if (Math.abs(bathroomScore - kitchenScore) < 4) roomType = "unknown";
+    else roomType = bathroomScore > kitchenScore ? "bathroom" : "kitchen";
+
+    return {
+      roomType,
+      bathroomScore: Math.round(bathroomScore * 100) / 100,
+      kitchenScore: Math.round(kitchenScore * 100) / 100,
+      detectedObjects,
+    };
+  }
+
+  function createRoomTypeLabel(room, roomType) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 384;
+    canvas.height = 112;
+    const ctx = canvas.getContext("2d");
+    const colors = {
+      kitchen: { background: "rgba(194, 94, 18, 0.92)", foreground: "#fff7ed" },
+      bathroom: { background: "rgba(0, 75, 135, 0.92)", foreground: "#eff6ff" },
+      unknown: { background: "rgba(75, 85, 99, 0.82)", foreground: "#f9fafb" },
+    };
+    const color = colors[roomType] || colors.unknown;
+    ctx.fillStyle = color.background;
+    ctx.fillRect(4, 4, canvas.width - 8, canvas.height - 8);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(6, 6, canvas.width - 12, canvas.height - 12);
+    ctx.fillStyle = color.foreground;
+    ctx.font = "700 54px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(ROOM_TYPE_LABELS[roomType] || ROOM_TYPE_LABELS.unknown, canvas.width / 2, canvas.height / 2 + 2);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+    const labelWidth = clamp(Math.min(state.floorBounds.width, state.floorBounds.depth) * 0.18, 1.2, 2.1);
+    sprite.scale.set(labelWidth, labelWidth * (canvas.height / canvas.width), 1);
+    sprite.position.set(room.userData.center.x, 0.32, room.userData.center.z);
+    sprite.renderOrder = 50;
+    sprite.userData = { type: "roomTypeLabel", roomId: room.userData.id, roomType };
+    return sprite;
+  }
+
+  function clearRoomTypeLabels() {
+    state.roomLabelObjects.forEach((label) => {
+      if (label.parent) label.parent.remove(label);
+      disposeObject3D(label);
+    });
+    state.roomLabelObjects = [];
+  }
+
+  async function placeDetectedFixture(detection, attrs, index, loadVersion) {
+    const roomType = detection.room && detection.room.userData.roomType;
+    const item = createDetectedFixtureItem(detection, roomType, attrs, index);
+    const pivot = await createGLBFurniturePivot(item) || create2DFurniturePivot(item);
+    if (loadVersion !== state.floorPlanVersion) {
+      disposeObject3D(pivot);
+      return;
+    }
+    pivot.position.set(detection.scenePoint.x, pivot.userData.centerY || 0, detection.scenePoint.z);
+    pivot.userData.autoDetected = true;
+    pivot.userData.detectionLabel = detection.label;
+    pivot.userData.detectionConfidence = detection.confidence;
+    pivot.userData.lastSafePosition = pivot.position.clone();
+    state.scene.add(pivot);
+    state.furnitureMeshes.push(pivot);
+    state.detectedFixtureMeshes.push(pivot);
+  }
+
+  function createDetectedFixtureItem(detection, roomType, attrs, index) {
+    const label = detection.label === "sink"
+      ? (roomType === "kitchen" ? "kitchen_sink" : "washbasin")
+      : detection.label;
+    const specs = {
+      toilet: { name: "변기", category: "화장실 설비", model: "toilet.glb", width: 70, depth: 110, height: 80 },
+      washbasin: { name: "세면대", category: "화장실 설비", model: "sink.glb", width: 65, depth: 50, height: 85 },
+      kitchen_sink: { name: "싱크대", category: "주방 설비", model: "kitchen_sink.glb", width: 120, depth: 60, height: 90 },
+    };
+    const spec = specs[label] || specs.washbasin;
+    const [x1, y1, x2, y2] = detection.bbox;
+    const detectedWidthCm = ((x2 - x1) / Math.max(attrs.width, 1)) * state.floorBounds.width * 100;
+    const detectedDepthCm = ((y2 - y1) / Math.max(attrs.height, 1)) * state.floorBounds.depth * 100;
+    const widthLimits = label === "kitchen_sink" ? [70, 240] : [40, 120];
+    const depthLimits = label === "kitchen_sink" ? [40, 100] : [35, 160];
+    return {
+      sku_id: `detected-${label}-${index + 1}`,
+      product_name: spec.name,
+      label: spec.name,
+      category: spec.category,
+      color: "white",
+      price: 0,
+      width: Number.isFinite(detectedWidthCm) ? clamp(detectedWidthCm, widthLimits[0], widthLimits[1]) : spec.width,
+      depth: Number.isFinite(detectedDepthCm) ? clamp(detectedDepthCm, depthLimits[0], depthLimits[1]) : spec.depth,
+      height: spec.height,
+      model_path: `/static/models/default/${spec.model}`,
+    };
+  }
+
   function rasterizePlanPolygonToMask(points, attrs, width, height) {
     const mask = new Uint8Array(width * height);
     if (!Array.isArray(points) || points.length < 3) return mask;
@@ -1419,6 +1735,7 @@
   }
 
   function clearRoomFloors() {
+    clearRoomTypeLabels();
     state.floorObjects.forEach((floor) => {
       if (floor.parent) floor.parent.remove(floor);
       disposeObject3D(floor);
@@ -2043,6 +2360,9 @@
   }
 
   function clearFloorPlan() {
+    state.floorPlanVersion += 1;
+    clearDetectedFixtures();
+    clearRoomTypeLabels();
     if (state.floorPlanGroup) {
       state.scene.remove(state.floorPlanGroup);
       disposeObject3D(state.floorPlanGroup);
@@ -2063,6 +2383,22 @@
     state.wallOverlayApplied = false;
     clearVisualization();
     updateEstimate();
+  }
+
+  function clearDetectedFixtures() {
+    if (state.detectedFixtureMeshes.length === 0) return;
+    const detected = new Set(state.detectedFixtureMeshes);
+    if (state.selectedFurniture && detected.has(state.selectedFurniture)) {
+      clearSelectionHighlight();
+      state.selectedFurniture = null;
+      state.selectedRenderedFurniture = null;
+    }
+    state.detectedFixtureMeshes.forEach((model) => {
+      if (model.parent) model.parent.remove(model);
+      disposeObject3D(model);
+    });
+    state.furnitureMeshes = state.furnitureMeshes.filter((model) => !detected.has(model));
+    state.detectedFixtureMeshes = [];
   }
 
   async function loadCatalog() {
@@ -3356,12 +3692,10 @@
     const panel = document.getElementById("warning-panel");
     if (!panel) return;
     panel.classList.toggle("ok", state.lastWarnings.length === 0);
-    panel.style.display = "grid";
-    if (state.lastWarnings.length === 0) {
-      panel.innerHTML = "<strong>배치 상태 양호</strong><span>충돌이나 벽 간섭이 없습니다.</span>";
-      return;
-    }
-    panel.innerHTML = `<strong>배치 경고</strong><span>${state.lastWarnings.join("<br>")}</span>`;
+    panel.style.display = "none";
+    panel.innerHTML = state.lastWarnings.length === 0
+      ? ""
+      : `<strong>배치 경고</strong><span>${state.lastWarnings.join("<br>")}</span>`;
   }
 
   function updateEstimate() {
@@ -3448,6 +3782,7 @@
     const groups = new Map();
     state.wallObjects.forEach((wall) => {
       if (!wall.userData || !wall.userData.wallpaperApplied) return;
+      if (isExteriorEstimateWall(wall)) return;
       const areaM2 = getWallWallpaperAreaM2(wall);
       if (areaM2 <= 0) return;
       const material = getWallMaterialByValue(wall.userData.wallMaterial || state.activeWallMaterial);
@@ -3487,6 +3822,19 @@
     return Math.max(0, length * height);
   }
 
+  function isExteriorEstimateWall(wall) {
+    const bounds = state.floorBounds;
+    const params = wall && wall.geometry && wall.geometry.parameters;
+    if (!bounds || !params) return false;
+    const box = getPlanBox(wall);
+    const wallThickness = Number(params.depth) || 0;
+    const tolerance = Math.max(wallThickness * 0.75, 0.08);
+    return Math.abs(box.minX - bounds.minX) <= tolerance
+      || Math.abs(box.maxX - bounds.maxX) <= tolerance
+      || Math.abs(box.minZ - bounds.minZ) <= tolerance
+      || Math.abs(box.maxZ - bounds.maxZ) <= tolerance;
+  }
+
   function getWallpaperRollAreaM2(material) {
     const widthM = (Number(material.widthMm) || 0) * 0.001;
     const lengthM = Number(material.lengthM) || 0;
@@ -3514,6 +3862,7 @@
   }
 
   function clearFurniture() {
+    state.floorPlanVersion += 1;
     clearSelectionHighlight();
     clearCollisionHelpers();
     state.furnitureMeshes.forEach((model) => {
@@ -3521,6 +3870,7 @@
       disposeObject3D(model);
     });
     state.furnitureMeshes = [];
+    state.detectedFixtureMeshes = [];
     state.selectedFurniture = null;
     state.selectedRenderedFurniture = null;
     clearVisualization();
@@ -3528,6 +3878,11 @@
   }
 
   async function acceptLayout() {
+    updateSafetyState();
+    if (state.lastWarnings.length > 0) {
+      alert(`가구 배치 간섭을 확인해주세요.\n\n${state.lastWarnings.join("\n")}`);
+      return;
+    }
     await show3DLayout();
   }
 
@@ -3596,31 +3951,40 @@
 
   async function addRenderedFurnitureModel(group, planModel) {
     const item = exportCatalogLikeItem(planModel);
-    const paths = resolveModelPaths(item);
-    const gltf = await loadGltfWithFallback(paths);
-    if (!gltf) {
-      const fallback = createRenderedFurnitureBox(planModel, item);
-      fallback.userData.sourcePlanModel = planModel;
-      state.renderedFurnitureMeshes.push(fallback);
-      group.add(fallback);
-      return;
+    try {
+      const paths = resolveModelPaths(item);
+      const gltf = await loadGltfWithFallback(paths);
+      if (!gltf) {
+        addRenderedFurnitureFallback(group, planModel, item);
+        return;
+      }
+
+      const model = gltf.scene;
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      const dimensions = getItemDimensions(item);
+      const targetW = Math.max((dimensions.width || 150) * 0.01, 0.18);
+      const targetH = Math.max((dimensions.height || 80) * 0.01, 0.18);
+      const targetD = Math.max((dimensions.depth || 80) * 0.01, 0.18);
+      model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
+
+      const pivot = createCenteredFurniturePivot(model, item);
+      pivot.position.set(planModel.position.x, pivot.userData.centerY || 0, planModel.position.z);
+      pivot.rotation.y = planModel.rotation.y;
+      pivot.userData.sourcePlanModel = planModel;
+      state.renderedFurnitureMeshes.push(pivot);
+      group.add(pivot);
+    } catch (err) {
+      console.warn("3D 가구 렌더링 중 대체 모델로 표시합니다.", err);
+      addRenderedFurnitureFallback(group, planModel, item);
     }
+  }
 
-    const model = gltf.scene;
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    const dimensions = getItemDimensions(item);
-    const targetW = Math.max((dimensions.width || 150) * 0.01, 0.18);
-    const targetH = Math.max((dimensions.height || 80) * 0.01, 0.18);
-    const targetD = Math.max((dimensions.depth || 80) * 0.01, 0.18);
-    model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
-
-    const pivot = createCenteredFurniturePivot(model, item);
-    pivot.position.set(planModel.position.x, pivot.userData.centerY || 0, planModel.position.z);
-    pivot.rotation.y = planModel.rotation.y;
-    pivot.userData.sourcePlanModel = planModel;
-    state.renderedFurnitureMeshes.push(pivot);
-    group.add(pivot);
+  function addRenderedFurnitureFallback(group, planModel, item) {
+    const fallback = createRenderedFurnitureBox(planModel, item);
+    fallback.userData.sourcePlanModel = planModel;
+    state.renderedFurnitureMeshes.push(fallback);
+    group.add(fallback);
   }
 
   function createRenderedFurnitureBox(planModel, item) {
@@ -4126,12 +4490,12 @@
     const sizeText = getItemSizeDescription(item).toLowerCase();
     const text = `${String(item.category || "").toLowerCase()} ${name} ${sizeText}`;
     if (text.includes("toilet") || text.includes("변기") || text.includes("양변기")) {
-      return "/static/models/Default/toilet.glb";
+      return "/static/models/default/toilet.glb";
     }
     if (text.includes("sink") || text.includes("싱크") || text.includes("세면") || text.includes("수전")) {
       return text.includes("kitchen") || text.includes("주방")
-        ? "/static/models/Default/kitchen_sink.glb"
-        : "/static/models/Default/sink.glb";
+        ? "/static/models/default/kitchen_sink.glb"
+        : "/static/models/default/sink.glb";
     }
     return "";
   }

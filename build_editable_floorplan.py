@@ -367,10 +367,19 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
     editable_wall_regions = editable_wall_regions_from_segments(segments, wall_mask)
     wall_render_rects = wall_render_rects_from_mask(wall_mask)
     floors = components_to_polygons(floor_mask, extract_layers.FLOOR_MIN_AREA)
-    room_masks = []
-    rooms = []
+    room_masks = split_floor_into_room_masks(img, floor_mask, wall_mask, thickness)
+    rooms = masks_to_polygons(
+        room_masks,
+        "room",
+        "room",
+        max(extract_layers.FLOOR_MIN_AREA, int(floor_mask.size * ROOM_MIN_AREA_RATIO)),
+    )
 
     payload = copy.deepcopy(src_json)
+    source_image = payload.get("image") if isinstance(payload.get("image"), dict) else {}
+    for detection_key in ("detections", "objects", "predictions", "annotations", "results"):
+        if detection_key not in payload and detection_key in source_image:
+            payload[detection_key] = copy.deepcopy(source_image[detection_key])
     attrs = dict(payload.get("@attributes", {}))
     attrs["width"] = width
     attrs["height"] = height
@@ -391,7 +400,7 @@ def build_editable_payload(input_path, output_path=None, debug_dir=None):
         "render_mode": "reconstructed_vectors",
         "wall_source": "extract_walls.extract_wall_mask",
         "floor_source": "extract_plan_footprint_mask",
-        "room_source": None,
+        "room_source": "split_floor_into_room_masks",
         "wall_count": len(walls),
         "editable_wall_count": len(editable_wall_regions),
         "floor_count": len(floors),

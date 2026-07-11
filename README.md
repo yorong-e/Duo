@@ -82,26 +82,33 @@ DuO/
 | `POST` | `/api/floorplans/collisions` | Validate vector footprints against walls/furniture on the backend |
 | `GET` | `/actuator/health` | Spring Boot health endpoint |
 
-## Floor-plan Fixture Detection
+## Floor-plan Room Labels
 
-The vectorization endpoint also runs the bundled Ultralytics floor-plan model
-at `weights/floorplan-fixtures.pt`. Detected kitchen sinks, bathroom sinks,
-toilets, showers, bathtubs, ranges, and refrigerators are returned in
-`detections[]`; the browser uses their bounding-box centers to classify rooms
-and place the matching default GLB fixtures.
+On macOS, the vectorization endpoint uses Vision OCR to recognize text and
+keeps only known room names such as `욕실`, `주방`, and `침실`. It returns
+the recognized string and source coordinates in `room_labels[]`; furniture
+lines, dimensions, and symbols are not rendered as labels. Large neutral-gray
+filled regions are returned as `layers.non_residential_mask`, rendered gray,
+and excluded from furniture placement.
+
+Room segmentation uses only the extracted physical wall mask. Furniture,
+floor patterns, and text no longer create virtual room boundaries. Short wall
+gaps are regularized into solid wall runs, while door-sized openings remain
+visible; door openings are closed only temporarily while calculating room
+connectivity.
+
+Gray-region filtering defaults to at least 1% of the full image with a 42%
+bounding-box fill density. Tune it with
+`FLOORPLAN_NON_RESIDENTIAL_MIN_AREA_RATIO` and
+`FLOORPLAN_NON_RESIDENTIAL_MIN_DENSITY` when a drawing profile needs stricter
+or looser filtering. For bounded spaces, at least 60% of the room must be gray;
+this can be changed with `FLOORPLAN_NON_RESIDENTIAL_ROOM_GRAY_RATIO`.
 
 Install the Python inference dependencies in the interpreter configured by
 `floorplan.python.command`:
 
 ```bash
 /opt/anaconda3/bin/python3 -m pip install -r requirements-floorplan.txt
-```
-
-The model path and confidence threshold can be overridden without code changes:
-
-```bash
-export FLOORPLAN_DETECTOR_MODEL=/absolute/path/to/custom-best.pt
-export FLOORPLAN_DETECTOR_CONFIDENCE=0.4
 ```
 
 ## Database Configuration

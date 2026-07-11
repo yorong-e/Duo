@@ -21,17 +21,11 @@ public class FloorplanService {
 
     private final ObjectMapper objectMapper;
     private final String pythonCommand;
-    private final String detectorModel;
-    private final double detectorConfidence;
 
     public FloorplanService(ObjectMapper objectMapper,
-                            @Value("${floorplan.python.command:python3}") String pythonCommand,
-                            @Value("${floorplan.detector.model:weights/floorplan-fixtures.pt}") String detectorModel,
-                            @Value("${floorplan.detector.confidence:0.4}") double detectorConfidence) {
+                            @Value("${floorplan.python.command:python3}") String pythonCommand) {
         this.objectMapper = objectMapper;
         this.pythonCommand = pythonCommand;
-        this.detectorModel = detectorModel;
-        this.detectorConfidence = detectorConfidence;
     }
 
     public JsonNode vectorize(MultipartFile file) throws IOException, InterruptedException {
@@ -76,12 +70,6 @@ public class FloorplanService {
         command.add(input.toString());
         command.add("-o");
         command.add(output.toString());
-        if (detectorModel != null && !detectorModel.isBlank()) {
-            command.add("--detector-model");
-            command.add(detectorModel);
-        }
-        command.add("--detector-confidence");
-        command.add(Double.toString(detectorConfidence));
         return command;
     }
 

@@ -134,7 +134,10 @@
     baseFloorObjects: [],
     roomObjects: [],
     roomLabelObjects: [],
+    roomLabelsVisible: true,
     wallOverlay: null,
+    nonResidentialMask: null,
+    nonResidentialOverlay: null,
     selectedRoomId: null,
     imageFloorMask: null,
     imageWallMask: null,
@@ -246,10 +249,12 @@
     bindClick("btn-wall-add", toggleWallDrawingMode);
     bindClick("btn-accept", acceptLayout);
     bindClick("btn-render-2d", show2DLayout);
+    bindClick("btn-toggle-room-labels", toggleRoomLabels);
     bindClick("btn-save", saveLayout);
     bindClick("btn-load", loadSavedLayout);
     bindClick("btn-pdf", downloadEstimatePdf);
     updateRenderModeButtons();
+    updateRoomLabelToggleButton();
 
     if (labelInput) {
       labelInput.addEventListener("input", () => {
@@ -269,6 +274,22 @@
   function bindClick(id, handler) {
     const el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
+  }
+
+  function toggleRoomLabels() {
+    state.roomLabelsVisible = !state.roomLabelsVisible;
+    state.roomLabelObjects.forEach((label) => {
+      label.visible = state.roomLabelsVisible;
+    });
+    updateRoomLabelToggleButton();
+  }
+
+  function updateRoomLabelToggleButton() {
+    const button = document.getElementById("btn-toggle-room-labels");
+    if (!button) return;
+    button.textContent = state.roomLabelsVisible ? "공간명 ON" : "공간명 OFF";
+    button.classList.toggle("active", state.roomLabelsVisible);
+    button.setAttribute("aria-pressed", String(state.roomLabelsVisible));
   }
 
   function updatePointerNDC(e, container) {
@@ -1121,6 +1142,7 @@
     // 표시용 벽과 충돌용 벽은 같은 축소 wall_mask를 공유한다. 표시 레이어는
     // CanvasTexture, 충돌 레이어는 Uint8Array+적분 배열로 각각 변환된다.
     loadWallMaskAssets(group, planData, planeW, planeH, loadVersion);
+    loadNonResidentialMaskAssets(group, planData, planeW, planeH, loadVersion);
     addEditableWallRegionsToGroup(group, planData, imageTransform);
     state.scene.add(group);
     state.floorPlanGroup = group;
@@ -1131,7 +1153,7 @@
     const usedExtractedRooms = loadExtractedRoomsFromPlan(planData, attrs);
     const usedExtractedFootprint = !usedExtractedRooms && loadExtractedFloorFootprintFromPlan(planData, attrs);
     if (!usedExtractedRooms && !usedExtractedFootprint) rebuildRoomsFromWalls();
-    void classifyRoomsAndPlaceDetectedFixtures(planData, attrs, loadVersion);
+    addRecognizedRoomLabels(group, planData, attrs);
     focusCameraOnPlanContent(planeW, planeH, new THREE.Vector3(0, 0, 0));
     updateSceneStatus(
       "재구성 평면도 로드 완료",
@@ -1141,6 +1163,12 @@
           ? "평면도 이미지 영역 전체를 바닥으로 인식합니다."
           : "벽으로 닫힌 내부 공간을 방 단위 바닥으로 인식합니다."
     );
+    if (usedExtractedRooms) {
+      updateSceneStatus(
+        "재구성 평면도 로드 완료",
+        "원본 도면에 적힌 욕실·주방·침실 등의 공간명을 그대로 표시합니다."
+      );
+    }
     updateSafetyState();
   }
 
@@ -1416,6 +1444,7 @@
       });
       const label = createRoomTypeLabel(room, classification.roomType);
       if (label && state.floorPlanGroup) {
+        label.visible = state.roomLabelsVisible;
         state.floorPlanGroup.add(label);
         state.roomLabelObjects.push(label);
       }
@@ -2008,12 +2037,19 @@
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.ClampToEdgeWrapping;
     texture.wrapT = THREE.ClampToEdgeWrapping;
+    // 방마다 만든 알파 마스크를 선형 보간하면 서로 맞닿는 경계가
+    // 반투명 회색 선으로 보인다. 최근접 샘플링과 alphaTest로 경계
+    // 픽셀을 완전 불투명/완전 투명으로만 렌더링한다.
+    texture.minFilter = THREE.NearestFilter;
+    texture.magFilter = THREE.NearestFilter;
+    texture.generateMipmaps = false;
     texture.needsUpdate = true;
     loadFloorImageIntoMaskedCanvas(ctx, canvas, room.mask, floorMaterial, texture, roomData);
     return new THREE.MeshStandardMaterial({
       color: 0xffffff,
       map: texture,
       transparent: true,
+      alphaTest: 0.5,
       roughness: 0.82,
       side: THREE.DoubleSide,
     });
@@ -2224,6 +2260,165 @@
     img.src = dataUri;
   }
 
+  function loadNonResidentialMaskAssets(group, planData, planeW, planeH, loadVersion) {
+    const dataUri = getLayerDataUri(planData, "non_residential_mask");
+    if (!dataUri) return;
+    const img = new Image();
+    img.onload = () => {
+      if (loadVersion !== state.floorPlanVersion || !group.parent) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      const mask = new Uint8Array(canvas.width * canvas.height);
+      for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+        const excluded = data[i] > 0 || data[i + 1] > 0 || data[i + 2] > 0;
+        mask[p] = excluded ? 1 : 0;
+        data[i] = 176;
+        data[i + 1] = 181;
+        data[i + 2] = 190;
+        data[i + 3] = excluded ? 255 : 0;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      state.nonResidentialMask = {
+        width: canvas.width,
+        height: canvas.height,
+        mask,
+        integral: buildMaskIntegral(mask, canvas.width, canvas.height),
+      };
+      excludeNonResidentialFromRoomFloors(state.nonResidentialMask);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.needsUpdate = true;
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(planeW, planeH),
+        new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        })
+      );
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.set(0, 0.008, 0);
+      mesh.renderOrder = 1;
+      mesh.userData.type = "nonResidentialOverlay";
+      mesh.userData.placementAllowed = false;
+      group.add(mesh);
+      state.nonResidentialOverlay = mesh;
+      updateSafetyState();
+    };
+    img.onerror = () => {
+      console.warn("회색 비실사용 공간 마스크를 불러오지 못했습니다.");
+    };
+    img.src = dataUri;
+  }
+
+  function excludeNonResidentialFromRoomFloors(nonResidentialMask) {
+    if (!nonResidentialMask || state.roomObjects.length === 0 || !state.floorBounds) return;
+    const changedRooms = [];
+    state.roomObjects.forEach((room) => {
+      const roomMask = room.userData.mask;
+      const roomWidth = room.userData.maskWidth;
+      const roomHeight = room.userData.maskHeight;
+      if (!roomMask || !roomWidth || !roomHeight) return;
+      let changed = false;
+      for (let y = 0; y < roomHeight; y += 1) {
+        const sourceY = clamp(
+          Math.floor(((y + 0.5) / roomHeight) * nonResidentialMask.height),
+          0,
+          nonResidentialMask.height - 1
+        );
+        for (let x = 0; x < roomWidth; x += 1) {
+          const index = y * roomWidth + x;
+          if (!roomMask[index]) continue;
+          const sourceX = clamp(
+            Math.floor(((x + 0.5) / roomWidth) * nonResidentialMask.width),
+            0,
+            nonResidentialMask.width - 1
+          );
+          if (!nonResidentialMask.mask[sourceY * nonResidentialMask.width + sourceX]) continue;
+          roomMask[index] = 0;
+          changed = true;
+        }
+      }
+      if (changed) changedRooms.push(room);
+    });
+    if (changedRooms.length === 0) return;
+
+    refreshRoomFloorMaterials(changedRooms);
+    const width = state.roomObjects[0].userData.maskWidth;
+    const height = state.roomObjects[0].userData.maskHeight;
+    state.imageFloorMask = buildMaskFromRooms({
+      width,
+      height,
+      bounds: state.floorBounds,
+      rooms: state.roomObjects.map((room) => ({ mask: room.userData.mask })),
+    });
+  }
+
+  function addRecognizedRoomLabels(group, planData, attrs) {
+    const labels = Array.isArray(planData.room_labels) ? planData.room_labels : [];
+    labels.forEach((label) => {
+      const bbox = label && label.bbox;
+      if (!bbox || !state.floorBounds) return;
+      const centerX = Number(bbox.x) + Number(bbox.width) / 2;
+      const centerY = Number(bbox.y) + Number(bbox.height) / 2;
+      if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) return;
+
+      const text = String(label.text || "").trim();
+      if (!text) return;
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      ctx.font = "700 48px sans-serif";
+      const measuredWidth = Math.ceil(ctx.measureText(text).width);
+      canvas.width = Math.max(180, measuredWidth + 56);
+      canvas.height = 96;
+      ctx.font = "700 48px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "rgba(255, 255, 255, 0.90)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = "rgba(17, 24, 39, 0.20)";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(1.5, 1.5, canvas.width - 3, canvas.height - 3);
+      ctx.fillStyle = "#111827";
+      ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.minFilter = THREE.LinearFilter;
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: false,
+      }));
+      const sceneWidth = (Number(bbox.width) / Math.max(attrs.width, 1)) * state.floorBounds.width;
+      const labelWidth = clamp(sceneWidth * 1.35, 0.72, 2.5);
+      sprite.scale.set(labelWidth, labelWidth * (canvas.height / canvas.width), 1);
+      sprite.position.set(
+        state.floorBounds.minX + (centerX / Math.max(attrs.width, 1)) * state.floorBounds.width,
+        0.34,
+        state.floorBounds.minZ + (centerY / Math.max(attrs.height, 1)) * state.floorBounds.depth
+      );
+      sprite.renderOrder = 4;
+      sprite.visible = state.roomLabelsVisible;
+      sprite.userData = {
+        type: "roomTypeLabel",
+        roomType: label.room_type || "unknown",
+        source: label.source || "ocr",
+        confidence: Number(label.confidence) || 0,
+        text,
+      };
+      group.add(sprite);
+      state.roomLabelObjects.push(sprite);
+    });
+  }
+
   function getLayerDataUri(planData, key) {
     const value = planData && planData.layers && planData.layers[key];
     return typeof value === "string" && value.indexOf("data:image") === 0 ? value : null;
@@ -2425,7 +2620,9 @@
     }
 
     state.gridHelper = new THREE.GridHelper(extent, divisions, 0x004b87, 0xaaaaaa);
-    state.gridHelper.position.set((bounds.minX + bounds.maxX) / 2, 0.01, (bounds.minZ + bounds.maxZ) / 2);
+    // 격자는 실내 바닥보다 아래에 둔다. 바닥 위로 올라오면 타일/치수선처럼
+    // 보이는 자잘한 선이 방 내부 전체에 렌더링된다.
+    state.gridHelper.position.set((bounds.minX + bounds.maxX) / 2, -0.03, (bounds.minZ + bounds.maxZ) / 2);
     state.scene.add(state.gridHelper);
   }
 
@@ -2441,6 +2638,8 @@
     state.imageFloorMask = null;
     state.imageWallMask = null;
     state.wallOverlay = null;
+    state.nonResidentialMask = null;
+    state.nonResidentialOverlay = null;
     state.wallRenderRects = null;
     state.floorLockedToPlan = false;
     state.wallObjects = [];
@@ -3503,6 +3702,7 @@
   function getBlockedPlacementReason(model, box) {
     if (isOutsideBounds(box)) return "평면도 경계 밖";
     if (boxIntersectsImageWall(box)) return "이미지 평면도 벽";
+    if (boxIntersectsNonResidentialArea(box)) return "회색 비실사용 공간";
     if (boxOutsideImageFloor(box)) return "타일 바닥 영역 밖";
     const modelFootprint = getPlanFootprint(model);
     for (const wall of state.wallObjects) {
@@ -3519,6 +3719,25 @@
     const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
     const hits = sumMaskArea(mask.integral, mask.width, pixelBox.minX, pixelBox.minY, pixelBox.maxX, pixelBox.maxY);
     return hits >= 3 && hits / area >= IMAGE_WALL_HIT_RATIO;
+  }
+
+  function boxIntersectsNonResidentialArea(box) {
+    if (!state.nonResidentialMask || !state.floorBounds) return false;
+    const mask = state.nonResidentialMask;
+    const pixelBox = planBoxToPixelBox(box, mask, state.floorBounds);
+    const area = Math.max(
+      (pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1),
+      1
+    );
+    const hits = sumMaskArea(
+      mask.integral,
+      mask.width,
+      pixelBox.minX,
+      pixelBox.minY,
+      pixelBox.maxX,
+      pixelBox.maxY
+    );
+    return hits / area >= 0.02;
   }
 
   function boxOutsideImageFloor(box) {

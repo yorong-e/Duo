@@ -35,6 +35,7 @@
   // 면적 계산에 충분한 정밀도를 유지한다.
   const FLOOR_MASK_TARGET_WIDTH = 640;
   const RENDERED_WALL_HEIGHT_RATIO = 0.6;
+  const ROOM_LABEL_SCENE_HEIGHT = 0.64;
 
   const DETECTION_LABEL_MAP = {
     toilet: "toilet", wc: "toilet", "변기": "toilet", "양변기": "toilet",
@@ -87,8 +88,10 @@
       name: "미니멀",
       color: "white",
       placements: [
-        { category: "소파", x: -1.8, z: -1.2, rot: 0 },
-        { category: "침대", x: 1.8, z: 1.1, rot: Math.PI / 2 },
+        { category: "소파", targetRoom: "living_room", rot: 0 },
+        { category: "식탁", targetRoom: "living_room", rot: 0 },
+        { category: "의자", targetRoom: "living_room", rot: 0 },
+        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: Math.PI / 2 },
       ],
     },
     {
@@ -96,8 +99,10 @@
       name: "웜우드",
       color: "brown",
       placements: [
-        { category: "소파", x: -2.1, z: 0.8, rot: Math.PI / 2 },
-        { category: "침대", x: 1.8, z: -1.2, rot: 0 },
+        { category: "소파", targetRoom: "living_room", rot: Math.PI / 2 },
+        { category: "식탁", targetRoom: "living_room", rot: 0 },
+        { category: "의자", targetRoom: "living_room", rot: Math.PI },
+        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: 0 },
       ],
     },
     {
@@ -105,8 +110,10 @@
       name: "모던블랙",
       color: "black",
       placements: [
-        { category: "소파", x: -1.6, z: -1.5, rot: 0 },
-        { category: "소파", x: 1.6, z: 1.5, rot: Math.PI },
+        { category: "소파", targetRoom: "living_room", rot: 0 },
+        { category: "식탁", targetRoom: "living_room", rot: 0 },
+        { category: "의자", targetRoom: "living_room", rot: Math.PI / 2 },
+        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: Math.PI },
       ],
     },
     {
@@ -114,8 +121,10 @@
       name: "트렌드블루",
       color: "blue",
       placements: [
-        { category: "소파", x: -1.9, z: 0, rot: Math.PI / 2 },
-        { category: "침대", x: 1.7, z: 1.3, rot: 0 },
+        { category: "소파", targetRoom: "living_room", rot: Math.PI / 2 },
+        { category: "식탁", targetRoom: "living_room", rot: 0 },
+        { category: "의자", targetRoom: "living_room", rot: Math.PI / 2 },
+        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: 0 },
       ],
     },
   ];
@@ -173,9 +182,14 @@
     blockedDragWarning: "",
     suppressAutoSelect: false,
     floorPlanVersion: 0,
+    currentPlanData: null,
+    needsRender: true,
   };
 
   const gltfLoader = new THREE.GLTFLoader();
+  const gltfCache = window.DuoPerformance.createGltfCache(gltfLoader);
+  const scheduleSafetyState = window.DuoPerformance.createFrameThrottle(updateSafetyState);
+  const scheduleEstimateUpdate = window.DuoPerformance.createFrameThrottle(updateEstimate);
   const textureLoader = new THREE.TextureLoader();
   const raycaster = new THREE.Raycaster();
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -207,11 +221,13 @@
     state.camera.position.set(5, 6, 7);
     state.renderer = new THREE.WebGLRenderer({ antialias: true });
     state.renderer.setSize(container.clientWidth, container.clientHeight);
+    state.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     state.renderer.shadowMap.enabled = true;
     container.appendChild(state.renderer.domElement);
 
     state.controls = new THREE.OrbitControls(state.camera, state.renderer.domElement);
     state.controls.enableDamping = true;
+    state.controls.addEventListener("change", invalidateRender);
 
     state.scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
@@ -234,6 +250,7 @@
     const container = getCanvasContainer();
     const toolbar = document.getElementById("furniture-toolbar");
     const labelInput = document.getElementById("material-label-input");
+    const rotationInput = document.getElementById("furniture-rotation-input");
 
     state.dragOffset = new THREE.Vector3();
     state.wallDragOffset = new THREE.Vector3();
@@ -250,9 +267,10 @@
     bindClick("btn-accept", acceptLayout);
     bindClick("btn-render-2d", show2DLayout);
     bindClick("btn-toggle-room-labels", toggleRoomLabels);
-    bindClick("btn-save", saveLayout);
-    bindClick("btn-load", loadSavedLayout);
+    bindClick("btn-save", openSaveLayoutDialog);
+    bindClick("btn-load", openLayoutFilePicker);
     bindClick("btn-pdf", downloadEstimatePdf);
+    initLayoutFileActions();
     updateRenderModeButtons();
     updateRoomLabelToggleButton();
 
@@ -261,6 +279,18 @@
         if (!state.selectedFurniture) return;
         state.selectedFurniture.userData.label = labelInput.value.trim() || state.selectedFurniture.userData.productName;
         updateEstimate();
+      });
+    }
+    if (rotationInput) {
+      rotationInput.addEventListener("input", () => {
+        if (!state.selectedFurniture) return;
+        const degrees = Number(rotationInput.value) || 0;
+        state.selectedFurniture.rotation.y = THREE.MathUtils.degToRad(degrees);
+        syncRenderedFurniturePosition(state.selectedFurniture, state.selectedRenderedFurniture);
+        if (state.selectionHelper) state.selectionHelper.update();
+        updateRotationControl(state.selectedFurniture);
+        scheduleSafetyState();
+        invalidateRender();
       });
     }
   }
@@ -276,6 +306,23 @@
     if (el) el.addEventListener("click", handler);
   }
 
+  function initLayoutFileActions() {
+    const dialog = document.getElementById("save-layout-dialog");
+    const form = document.getElementById("save-layout-form");
+    const cancel = document.getElementById("btn-save-cancel");
+    const input = document.getElementById("layoutFileInput");
+    if (cancel && dialog) cancel.addEventListener("click", () => dialog.close());
+    if (form && dialog) {
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const nameInput = document.getElementById("layout-name-input");
+        saveLayout(nameInput ? nameInput.value : "");
+        dialog.close();
+      });
+    }
+    if (input) input.addEventListener("change", handleLayoutFileSelected);
+  }
+
   function toggleRoomLabels() {
     state.roomLabelsVisible = !state.roomLabelsVisible;
     state.roomLabelObjects.forEach((label) => {
@@ -287,7 +334,8 @@
   function updateRoomLabelToggleButton() {
     const button = document.getElementById("btn-toggle-room-labels");
     if (!button) return;
-    button.textContent = state.roomLabelsVisible ? "공간명 ON" : "공간명 OFF";
+    button.textContent = "공간명";
+    button.title = state.roomLabelsVisible ? "공간명 숨기기" : "공간명 표시";
     button.classList.toggle("active", state.roomLabelsVisible);
     button.setAttribute("aria-pressed", String(state.roomLabelsVisible));
   }
@@ -385,8 +433,8 @@
       );
       clearVisualization();
       if (state.selectionHelper) state.selectionHelper.update();
-      refreshRoomsAfterWallEdit();
-      updateSafetyState("벽 위치를 조정했습니다.");
+      scheduleSafetyState("벽 위치를 조정했습니다.");
+      invalidateRender();
       return;
     }
 
@@ -405,24 +453,30 @@
     state.selectedFurniture.position.copy(snapped.position);
     if (blocked) {
       state.blockedDragWarning = `${state.selectedFurniture.userData.label}은 ${blocked.reason}에 배치할 수 없습니다.`;
-      updateSafetyState(snapped.message);
+      scheduleSafetyState(snapped.message);
       addCollisionFootprint(blocked.box);
     } else {
       state.selectedFurniture.userData.lastSafePosition = snapped.position.clone();
       state.blockedDragWarning = "";
-      updateSafetyState(snapped.message);
+      scheduleSafetyState(snapped.message);
     }
     syncRenderedFurniturePosition(state.selectedFurniture, state.selectedRenderedFurniture);
     if (state.selectionHelper) state.selectionHelper.update();
-    updateEstimate();
+    scheduleEstimateUpdate();
+    invalidateRender();
   }
 
   async function onPointerUp() {
     if (!state.isDragging && !state.isWallDragging) return;
-    const needs3DRefresh = state.renderMode === "3d" && (state.isDragging || state.isWallDragging);
+    // 가구는 드래그 중 2D 원본과 3D 표시 모델의 위치를 이미 동기화한다.
+    // 포인터를 놓을 때 전체 3D 장면을 다시 만들면 모델이 재로딩되는 동안
+    // 가구가 잠깐 사라지므로, 벽 형상이 바뀐 경우에만 장면을 재생성한다.
+    const wallWasDragged = state.isWallDragging;
+    const needs3DRefresh = state.renderMode === "3d" && wallWasDragged;
     state.isDragging = false;
     state.isWallDragging = false;
     state.controls.enabled = true;
+    if (wallWasDragged) refreshRoomsAfterWallEdit();
     updateSafetyState();
     updateEstimate();
     if (needs3DRefresh) {
@@ -431,13 +485,18 @@
   }
 
   function syncRenderedFurniturePosition(planModel, renderedModel) {
-    if (!planModel || !renderedModel) return;
-    renderedModel.position.set(
+    if (!planModel) return;
+    const target = renderedModel || state.renderedFurnitureMeshes.find(
+      (rendered) => rendered.userData.sourcePlanModel === planModel
+    );
+    if (!target) return;
+    target.position.set(
       planModel.position.x,
-      renderedModel.userData.centerY || planModel.userData.centerY || 0,
+      target.userData.centerY || planModel.userData.centerY || 0,
       planModel.position.z
     );
-    renderedModel.rotation.y = planModel.rotation.y;
+    target.rotation.y = planModel.rotation.y;
+    invalidateRender();
   }
 
   function onCatalogDrop(e, container) {
@@ -481,9 +540,11 @@
       if (toolbar) toolbar.style.display = "flex";
       setWallToolbarLocked(toolbar, null);
       if (labelInput) labelInput.value = model.userData.label || model.userData.productName || "자재";
+      updateRotationControl(model);
     } else if (toolbar) {
       toolbar.style.display = "none";
     }
+    invalidateRender();
   }
 
   function selectWall(wall, toolbar) {
@@ -508,14 +569,27 @@
       toolbar.style.display = "none";
       setWallToolbarLocked(toolbar, null);
     }
+    invalidateRender();
   }
 
   function setWallToolbarLocked(toolbar, wall) {
     if (!toolbar) return;
     const rotate = document.getElementById("btn-rotate");
     const del = document.getElementById("btn-delete");
+    const rotationControl = document.getElementById("rotation-control");
     if (rotate) rotate.disabled = wall ? !isMovableWall(wall) : false;
     if (del) del.disabled = wall ? !isDeletableWall(wall) : false;
+    if (rotationControl) rotationControl.hidden = Boolean(wall);
+  }
+
+  function updateRotationControl(model) {
+    const input = document.getElementById("furniture-rotation-input");
+    const value = document.getElementById("rotation-value");
+    if (!input || !model) return;
+    const degrees = Math.round(THREE.MathUtils.radToDeg(model.rotation.y));
+    const normalized = ((degrees % 360) + 360) % 360;
+    input.value = String(normalized);
+    if (value) value.textContent = `${normalized}°`;
   }
 
   function selectRoom(room) {
@@ -530,6 +604,7 @@
       renderFloorMaterials();
       renderWallMaterials();
     }
+    invalidateRender();
   }
 
   function clearSelectionHighlight() {
@@ -538,6 +613,7 @@
     state.selectionHelper.geometry.dispose();
     state.selectionHelper.material.dispose();
     state.selectionHelper = null;
+    invalidateRender();
   }
 
   async function rotateSelectedFurniture() {
@@ -562,9 +638,8 @@
     state.selectedFurniture.rotation.y += Math.PI / 2;
     syncRenderedFurniturePosition(state.selectedFurniture, state.selectedRenderedFurniture);
     if (state.selectionHelper) state.selectionHelper.update();
-    if (was3D) {
-      await refresh3DVisualization();
-    } else {
+    updateRotationControl(state.selectedFurniture);
+    if (!was3D) {
       clearVisualization();
     }
     updateSafetyState();
@@ -603,18 +678,11 @@
     state.furnitureMeshes = state.furnitureMeshes.filter((m) => m !== model);
     state.detectedFixtureMeshes = state.detectedFixtureMeshes.filter((m) => m !== model);
     clearSelectionHighlight();
-    if (state.selectedRenderedFurniture && state.selectedRenderedFurniture.parent) {
-      state.selectedRenderedFurniture.parent.remove(state.selectedRenderedFurniture);
-      disposeObject3D(state.selectedRenderedFurniture);
-    }
+    if (was3D) removeRenderedFurnitureForPlan(model);
     state.selectedFurniture = null;
     state.selectedRenderedFurniture = null;
     if (toolbar) toolbar.style.display = "none";
-    if (was3D) {
-      await refresh3DVisualization();
-    } else {
-      clearVisualization();
-    }
+    if (!was3D) clearVisualization();
     updateSafetyState();
     updateEstimate();
   }
@@ -718,7 +786,7 @@
     input.addEventListener("change", handleFloorPlanFileSelected);
   }
 
-  function handleFloorPlanFileSelected(e) {
+  async function handleFloorPlanFileSelected(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     e.target.value = "";
@@ -727,40 +795,43 @@
       return;
     }
 
-    vectorizeFloorPlanFile(file)
-      .then((planData) => loadFloorPlan(planData))
-      .catch((err) => {
-        console.error(err);
-        alert("평면도 데이터를 불러오지 못했습니다: " + err.message);
-      });
+    setFloorPlanLoading(true);
+    try {
+      const planData = await vectorizeFloorPlanFile(file);
+      loadFloorPlan(planData);
+      getCanvasContainer().classList.add("has-plan");
+    } catch (err) {
+      console.error(err);
+      updateSceneStatus("불러오기 실패", err.message);
+      alert("평면도 데이터를 불러오지 못했습니다: " + err.message);
+    } finally {
+      setFloorPlanLoading(false);
+    }
+  }
+
+  function setFloorPlanLoading(isLoading) {
+    const container = getCanvasContainer();
+    const input = document.getElementById("floorPlanInput");
+    const upload = document.getElementById("floor-plan-upload");
+    const loading = document.getElementById("floorplan-loading");
+    container.classList.toggle("is-loading", isLoading);
+    if (input) input.disabled = isLoading;
+    if (upload) {
+      upload.classList.toggle("is-loading", isLoading);
+      upload.setAttribute("aria-busy", String(isLoading));
+    }
+    if (loading) loading.setAttribute("aria-hidden", String(!isLoading));
   }
 
   async function vectorizeFloorPlanFile(file) {
     updateSceneStatus("평면도 분석 중", "서버에서 벽과 바닥을 분리하고 재구성 JSON을 만들고 있습니다.");
-    const form = new FormData();
-    form.append("file", file);
-    const res = await fetch("/api/floorplans/vectorize", {
-      method: "POST",
-      body: form,
-    });
-    if (!res.ok) {
-      const message = await readErrorMessage(res);
-      if (res.status === 413) {
+    try {
+      return await window.DuoApi.vectorizeFloorPlan(file);
+    } catch (error) {
+      if (error.status === 413) {
         throw new Error(`업로드 파일(${formatBytes(file.size)})이 서버 허용 크기보다 큽니다. 서버 재시작 후 다시 시도하세요.`);
       }
-      throw new Error(message || `서버 벡터화 요청 실패 (${res.status})`);
-    }
-    return res.json();
-  }
-
-  async function readErrorMessage(res) {
-    const text = await res.text();
-    if (!text) return "";
-    try {
-      const data = JSON.parse(text);
-      return data.message || data.error || text;
-    } catch (_err) {
-      return text;
+      throw error;
     }
   }
 
@@ -780,6 +851,7 @@
   // ========================================================================
 
   function loadFloorPlan(planData) {
+    state.currentPlanData = planData;
     if (isEditableFloorPlan(planData)) {
       loadReconstructedFloorPlan(planData);
       return;
@@ -1672,8 +1744,8 @@
     const texture = new THREE.CanvasTexture(canvas);
     texture.minFilter = THREE.LinearFilter;
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
-    const labelWidth = clamp(Math.min(state.floorBounds.width, state.floorBounds.depth) * 0.18, 1.2, 2.1);
-    sprite.scale.set(labelWidth, labelWidth * (canvas.height / canvas.width), 1);
+    const labelWidth = ROOM_LABEL_SCENE_HEIGHT * (canvas.width / canvas.height);
+    sprite.scale.set(labelWidth, ROOM_LABEL_SCENE_HEIGHT, 1);
     sprite.position.set(room.userData.center.x, 0.32, room.userData.center.z);
     sprite.renderOrder = 50;
     sprite.userData = { type: "roomTypeLabel", roomId: room.userData.id, roomType };
@@ -2255,6 +2327,11 @@
       mesh.userData.type = "wallOverlay";
       group.add(mesh);
       state.wallOverlay = { mesh, canvas, ctx, texture, originalImage: ctx.getImageData(0, 0, canvas.width, canvas.height) };
+      // 저장 파일 복원 중에는 벽 마스크 이미지가 비동기로 늦게 도착할 수 있다.
+      // 그 전에 복원된 벽지 선택값이 있으면 마스크 생성 직후 다시 칠한다.
+      if (state.wallOverlayApplied) {
+        repaintWallOverlayMaterial(state.wallOverlayMaterial || state.activeWallMaterial);
+      }
       updateSafetyState();
     };
     img.src = dataUri;
@@ -2397,9 +2474,10 @@
         transparent: true,
         depthTest: false,
       }));
-      const sceneWidth = (Number(bbox.width) / Math.max(attrs.width, 1)) * state.floorBounds.width;
-      const labelWidth = clamp(sceneWidth * 1.35, 0.72, 2.5);
-      sprite.scale.set(labelWidth, labelWidth * (canvas.height / canvas.width), 1);
+      // OCR bbox 크기는 글자마다 달라 표시 크기 기준으로 쓰지 않는다.
+      // 모든 공간명은 같은 높이를 사용하고 긴 이름만 가로 배경이 늘어난다.
+      const labelWidth = ROOM_LABEL_SCENE_HEIGHT * (canvas.width / canvas.height);
+      sprite.scale.set(labelWidth, ROOM_LABEL_SCENE_HEIGHT, 1);
       sprite.position.set(
         state.floorBounds.minX + (centerX / Math.max(attrs.width, 1)) * state.floorBounds.width,
         0.34,
@@ -2674,9 +2752,7 @@
     const listEl = document.getElementById("furniture-list");
     if (!listEl) return;
     try {
-      const res = await fetch("/api/furniture");
-      if (!res.ok) throw new Error("API 요청 실패");
-      state.catalogItems = await res.json();
+      state.catalogItems = await window.DuoApi.getJson("/api/furniture");
       ensureActiveFurnitureCategory();
       renderCatalogTabs();
       renderFurnitureCategoryFilters();
@@ -2690,9 +2766,7 @@
 
   async function loadFloorMaterials() {
     try {
-      const res = await fetch("/api/floors");
-      if (!res.ok) throw new Error("바닥재 API 요청 실패");
-      const items = await res.json();
+      const items = await window.DuoApi.getJson("/api/floors");
       state.floorMaterials = items.map(mapFloorMaterialItem).filter(Boolean);
       if (state.floorMaterials.length > 0 && !state.floorMaterials.some((item) => item.value === state.activeFloorMaterial)) {
         state.activeFloorMaterial = state.floorMaterials[0].value;
@@ -2711,9 +2785,7 @@
 
   async function loadWallMaterials() {
     try {
-      const res = await fetch("/api/wallpapers");
-      if (!res.ok) throw new Error("벽지 API 요청 실패");
-      const items = await res.json();
+      const items = await window.DuoApi.getJson("/api/wallpapers");
       state.wallMaterials = items.map(mapWallpaperItem).filter(Boolean);
       if (state.wallMaterials.length > 0 && !state.wallMaterials.some((item) => item.value === state.activeWallMaterial)) {
         state.activeWallMaterial = state.wallMaterials[0].value;
@@ -2866,7 +2938,6 @@
 
   function renderFloorMaterials() {
     const el = document.getElementById("floor-materials");
-    const label = document.getElementById("floor-material-name");
     if (!el) return;
     el.innerHTML = "";
     getFloorMaterials().forEach((material) => {
@@ -2882,13 +2953,10 @@
       });
       el.appendChild(button);
     });
-    const active = getActiveFloorMaterial();
-    if (label) label.textContent = active.label;
   }
 
   function renderWallMaterials() {
     const el = document.getElementById("wall-materials");
-    const label = document.getElementById("wall-material-name");
     if (!el) return;
     el.innerHTML = "";
     getWallMaterials().forEach((material) => {
@@ -2904,8 +2972,6 @@
       });
       el.appendChild(button);
     });
-    const active = getActiveWallMaterial();
-    if (label) label.textContent = active.label;
   }
 
   function getActiveFloorMaterial() {
@@ -3307,14 +3373,11 @@
 
   function renderCatalog() {
     const listEl = document.getElementById("furniture-list");
-    const countEl = document.getElementById("catalog-count");
     if (!listEl) return;
     if (state.activeCatalogSection !== "furniture") {
-      if (countEl) countEl.textContent = state.activeCatalogSection === "floor" ? `${getFloorMaterials().length} finishes` : `${getWallMaterials().length} finishes`;
       return;
     }
     const items = getFilteredCatalogItems();
-    if (countEl) countEl.textContent = `${items.length} items`;
     listEl.innerHTML = "";
     if (items.length === 0) {
       const empty = document.createElement("p");
@@ -3354,6 +3417,8 @@
     thumb.src = item.image_url || "";
     thumb.alt = item.product_name || "furniture";
     thumb.className = "furniture-thumb";
+    thumb.loading = "lazy";
+    thumb.decoding = "async";
     thumb.onerror = () => thumb.replaceWith(createThumbnailFallback());
     return thumb;
   }
@@ -3399,23 +3464,99 @@
     if (!was3D) {
       clearVisualization();
     }
-    const pivot = await createGLBFurniturePivot(item) || create2DFurniturePivot(item);
+    // 추천 패턴은 먼저 가벼운 평면 객체로 즉시 배치한다. GLB는 사용자가
+    // 3D 보기로 전환할 때 addRenderedFurnitureModels에서 한꺼번에 로드한다.
+    const pivot = options.fastPlan
+      ? create2DFurniturePivot(item)
+      : await createGLBFurniturePivot(item) || create2DFurniturePivot(item);
     addPlacedFurniturePivot(pivot, options);
+    if (options.fastPlan) {
+      // 가벼운 박스로 먼저 즉시 배치한 뒤 실제 GLB를 병렬로 읽어 같은
+      // 위치에서 교체한다. 추천 클릭은 빠르고 결과는 박스로 남지 않는다.
+      void upgradePlanningFurnitureModel(pivot, item).catch((err) => {
+        console.warn("추천 가구 모델을 불러오지 못해 평면 표시를 유지합니다.", err);
+      });
+    }
     if (was3D) {
       pivot.visible = false;
-      await refresh3DVisualization();
+      const rendered = await addRenderedFurnitureModel(state.visualizationGroup, pivot);
+      if (state.selectedFurniture === pivot && rendered) {
+        selectFurniture(pivot, document.getElementById("furniture-toolbar"), rendered);
+      }
+      invalidateRender();
     }
   }
 
+  async function upgradePlanningFurnitureModel(placeholder, item) {
+    const upgraded = await createGLBFurniturePivot(item);
+    if (!upgraded) return;
+    const index = state.furnitureMeshes.indexOf(placeholder);
+    if (index < 0 || !placeholder.parent) {
+      disposeObject3D(upgraded);
+      return;
+    }
+    upgraded.position.set(
+      placeholder.position.x,
+      upgraded.userData.centerY || 0,
+      placeholder.position.z
+    );
+    upgraded.rotation.copy(placeholder.rotation);
+    upgraded.userData.label = placeholder.userData.label;
+    if (placeholder.userData.lastSafePosition) {
+      upgraded.userData.lastSafePosition = placeholder.userData.lastSafePosition.clone();
+    }
+    upgraded.visible = state.renderMode !== "3d";
+    placeholder.userData.replacedBy = upgraded;
+    state.scene.add(upgraded);
+    state.furnitureMeshes[index] = upgraded;
+    state.renderedFurnitureMeshes.forEach((rendered) => {
+      if (rendered.userData.sourcePlanModel === placeholder) {
+        rendered.userData.sourcePlanModel = upgraded;
+      }
+    });
+    if (state.selectedFurniture === placeholder) {
+      state.selectedFurniture = upgraded;
+      selectFurniture(upgraded, document.getElementById("furniture-toolbar"));
+    }
+    if (placeholder.parent) placeholder.parent.remove(placeholder);
+    disposeObject3D(placeholder);
+    updateSafetyState();
+    updateEstimate();
+  }
+
   function addPlacedFurniturePivot(pivot, options) {
-    pivot.position.set(options.x || 0, pivot.userData.centerY || 0, options.z || 0);
-    pivot.rotation.y = options.rot || 0;
-    state.scene.add(pivot);
-    state.furnitureMeshes.push(pivot);
+    const hasRequestedPosition = Number.isFinite(options.x) && Number.isFinite(options.z);
+    const defaultAnchor = getDefaultFurnitureAnchor(
+      pivot.userData.category,
+      options.targetRoom,
+      options.roomIndex
+    );
+    pivot.position.set(
+      hasRequestedPosition ? options.x : defaultAnchor.x,
+      pivot.userData.centerY || 0,
+      hasRequestedPosition ? options.z : defaultAnchor.z
+    );
+    pivot.rotation.y = Number(options.rot) || 0;
 
     const constrained = applyWallMagnetAndBounds(pivot, pivot.position);
     pivot.position.copy(constrained.position);
-    if (!getBlockedPlacementAt(pivot, pivot.position)) {
+    const shouldAutoPlace = options.autoPlace === true || !hasRequestedPosition;
+    if (shouldAutoPlace) {
+      const wallPlacement = options.wallPreferred
+        ? findAvailableWallFurniturePlacement(pivot, pivot.position)
+        : null;
+      if (wallPlacement) {
+        pivot.position.copy(wallPlacement.position);
+        pivot.rotation.y = wallPlacement.rotationY;
+      } else if (!isFurniturePlacementAvailable(pivot, pivot.position)) {
+        const available = findAvailableFurniturePosition(pivot, pivot.position);
+        if (available) pivot.position.copy(available);
+      }
+    }
+
+    state.scene.add(pivot);
+    state.furnitureMeshes.push(pivot);
+    if (isFurniturePlacementAvailable(pivot, pivot.position)) {
       pivot.userData.lastSafePosition = pivot.position.clone();
     }
 
@@ -3424,6 +3565,270 @@
     }
     updateSafetyState();
     updateEstimate();
+  }
+
+  function getDefaultFurnitureAnchor(category, targetRoom, roomIndex) {
+    const semanticAnchor = getSemanticFurnitureAnchor(category, targetRoom, roomIndex);
+    if (semanticAnchor) return semanticAnchor;
+    const selected = state.roomObjects.find((room) => room.userData.id === state.selectedRoomId);
+    if (selected && selected.userData.center) return selected.userData.center;
+    const largestRoom = state.roomObjects.reduce((largest, room) => {
+      const bbox = room.userData.bbox || {};
+      const area = Math.max(0, (bbox.maxX - bbox.minX) * (bbox.maxY - bbox.minY));
+      return !largest || area > largest.area ? { room, area } : largest;
+    }, null);
+    if (largestRoom && largestRoom.room.userData.center) {
+      return largestRoom.room.userData.center;
+    }
+    return state.floorBounds ? state.floorBounds.center : { x: 0, z: 0 };
+  }
+
+  function getSemanticFurnitureAnchor(category, targetRoom, roomIndex) {
+    const preferredTypes = [];
+    if (targetRoom) preferredTypes.push(targetRoom);
+    getPreferredRoomTypesForCategory(category).forEach((roomType) => {
+      if (!preferredTypes.includes(roomType)) preferredTypes.push(roomType);
+    });
+    for (const roomType of preferredTypes) {
+      const labels = state.roomLabelObjects.filter(
+        (label) => label.userData && label.userData.roomType === roomType
+      );
+      if (labels.length === 0) continue;
+      const index = Math.abs(Number(roomIndex) || 0) % labels.length;
+      return { x: labels[index].position.x, z: labels[index].position.z };
+    }
+    return null;
+  }
+
+  function getPreferredRoomTypesForCategory(category) {
+    const value = String(category || "").toLowerCase();
+    if (value.includes("침대")) return ["bedroom"];
+    if (value.includes("소파") || value.includes("식탁") || value.includes("테이블") || value.includes("의자")) {
+      return ["living_room", "kitchen"];
+    }
+    if (value.includes("화장대") || value.includes("서랍장")) {
+      return ["dress_room", "bedroom"];
+    }
+    if (value.includes("책상")) return ["bedroom", "alpha_room"];
+    if (value.includes("수납장")) return ["bedroom", "living_room", "dress_room"];
+    if (value.includes("냉장고")) return ["kitchen"];
+    return [];
+  }
+
+  function isFurniturePlacementAvailable(model, position) {
+    if (getBlockedPlacementAt(model, position)) return false;
+    const original = model.position.clone();
+    model.position.copy(position);
+    const footprint = getPlanFootprint(model);
+    model.position.copy(original);
+    return !state.furnitureMeshes.some(
+      (other) => other !== model && footprintsIntersect(footprint, getPlanFootprint(other))
+    );
+  }
+
+  function findAvailableFurniturePosition(model, preferredPosition) {
+    if (!state.floorBounds) return preferredPosition.clone();
+    const footprint = getFootprintDimensions(model) || { width: 0.8, depth: 0.8 };
+    const step = clamp(Math.max(footprint.width, footprint.depth) * 0.65, 0.55, 1.4);
+    const roomAnchors = state.roomObjects
+      .map((room) => ({
+        center: room.userData.center,
+        bbox: room.userData.bbox || {},
+      }))
+      .filter((entry) => entry.center)
+      .sort((a, b) => {
+        const areaA = (a.bbox.maxX - a.bbox.minX) * (a.bbox.maxY - a.bbox.minY);
+        const areaB = (b.bbox.maxX - b.bbox.minX) * (b.bbox.maxY - b.bbox.minY);
+        return areaB - areaA;
+      })
+      .map((entry) => entry.center);
+    const anchors = [preferredPosition, ...roomAnchors, state.floorBounds.center];
+    const seenAnchors = new Set();
+    const maxRings = Math.ceil(
+      Math.max(state.floorBounds.width, state.floorBounds.depth) / step
+    );
+
+    for (const anchor of anchors) {
+      const key = `${anchor.x.toFixed(2)},${anchor.z.toFixed(2)}`;
+      if (seenAnchors.has(key)) continue;
+      seenAnchors.add(key);
+      for (let ring = 0; ring <= maxRings; ring += 1) {
+        for (let dz = -ring; dz <= ring; dz += 1) {
+          for (let dx = -ring; dx <= ring; dx += 1) {
+            if (ring > 0 && Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue;
+            const candidate = new THREE.Vector3(
+              anchor.x + dx * step,
+              model.userData.centerY || 0,
+              anchor.z + dz * step
+            );
+            if (isFurniturePlacementAvailable(model, candidate)) return candidate;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function findAvailableWallFurniturePlacement(model, preferredPosition) {
+    if (!state.floorBounds) return null;
+    const directImagePlacement = findImageWallPlacementNearPoint(model, preferredPosition);
+    if (directImagePlacement) return directImagePlacement;
+    const originalPosition = model.position.clone();
+    const originalRotation = model.rotation.y;
+    const footprint = getFootprintDimensions(model) || { width: 0.8, depth: 0.8 };
+    const step = clamp(Math.min(footprint.width, footprint.depth) * 0.65, 0.45, 0.9);
+    // 이미지 벽 직접 배치가 실패했을 때만 가까운 범위에서 벡터 벽을
+    // 확인한다. 도면 전체를 훑는 기존 방식은 추천 클릭 렉의 원인이었다.
+    const maxRings = Math.min(8, Math.ceil(
+      Math.max(state.floorBounds.width, state.floorBounds.depth) / step
+    ));
+
+    for (let ring = 0; ring <= maxRings; ring += 1) {
+      for (let dz = -ring; dz <= ring; dz += 1) {
+        for (let dx = -ring; dx <= ring; dx += 1) {
+          if (ring > 0 && Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue;
+          const candidate = new THREE.Vector3(
+            preferredPosition.x + dx * step,
+            model.userData.centerY || 0,
+            preferredPosition.z + dz * step
+          );
+          model.position.copy(candidate);
+          model.rotation.y = originalRotation;
+          let snap = findBestWallSnap(getPlanBox(model));
+          if (!snap) continue;
+
+          const rotationY = Number.isFinite(snap.rotationY)
+            ? snap.rotationY
+            : originalRotation;
+          model.rotation.y = rotationY;
+          model.position.copy(candidate);
+          snap = findBestWallSnap(getPlanBox(model));
+          if (!snap) continue;
+          const snappedPosition = candidate.clone();
+          snappedPosition.x += snap.dx;
+          snappedPosition.z += snap.dz;
+          if (!isFurniturePlacementAvailable(model, snappedPosition)) continue;
+
+          model.position.copy(originalPosition);
+          model.rotation.y = originalRotation;
+          return { position: snappedPosition, rotationY };
+        }
+      }
+    }
+    model.position.copy(originalPosition);
+    model.rotation.y = originalRotation;
+    return null;
+  }
+
+  function findImageWallPlacementNearPoint(model, preferredPosition) {
+    const mask = state.imageWallMask;
+    const bounds = state.floorBounds;
+    if (!mask || !bounds) return null;
+    const center = planPointToPixel(preferredPosition.x, preferredPosition.z, mask, bounds);
+    const wallPixel = findNearestMaskPixel(mask, center.x, center.y);
+    if (!wallPixel) return null;
+    const tangent = estimateWallTangent(mask, wallPixel.x, wallPixel.y, bounds);
+    if (!tangent) return null;
+
+    const wallPoint = pixelToPlanPoint(wallPixel.x, wallPixel.y, mask, bounds);
+    const towardRoom = {
+      x: preferredPosition.x - wallPoint.x,
+      z: preferredPosition.z - wallPoint.z,
+    };
+    const towardLength = Math.hypot(towardRoom.x, towardRoom.z);
+    const normals = towardLength > 0.001
+      ? [{ x: towardRoom.x / towardLength, z: towardRoom.z / towardLength }]
+      : [
+          { x: -tangent.z, z: tangent.x },
+          { x: tangent.z, z: -tangent.x },
+        ];
+    const originalPosition = model.position.clone();
+    const originalRotation = model.rotation.y;
+    const rotationY = -Math.atan2(tangent.z, tangent.x);
+    model.rotation.y = rotationY;
+
+    for (const normal of normals) {
+      model.position.set(wallPoint.x, model.userData.centerY || 0, wallPoint.z);
+      const box = getPlanBox(model);
+      const halfTowardWall = (
+        Math.abs(normal.x) * (box.maxX - box.minX) / 2
+        + Math.abs(normal.z) * (box.maxZ - box.minZ) / 2
+      );
+      const base = new THREE.Vector3(
+        wallPoint.x + normal.x * (halfTowardWall + WALL_BUFFER + 0.03),
+        model.userData.centerY || 0,
+        wallPoint.z + normal.z * (halfTowardWall + WALL_BUFFER + 0.03)
+      );
+      const slideStep = clamp(Math.max(box.maxX - box.minX, box.maxZ - box.minZ) * 0.55, 0.45, 1.1);
+      for (let index = 0; index <= 8; index += 1) {
+        const direction = index === 0 ? 0 : (index % 2 ? 1 : -1) * Math.ceil(index / 2);
+        const candidate = base.clone();
+        candidate.x += tangent.x * slideStep * direction;
+        candidate.z += tangent.z * slideStep * direction;
+        if (!isFurniturePlacementAvailable(model, candidate)) continue;
+        model.position.copy(originalPosition);
+        model.rotation.y = originalRotation;
+        return { position: candidate, rotationY };
+      }
+    }
+    model.position.copy(originalPosition);
+    model.rotation.y = originalRotation;
+    return null;
+  }
+
+  function findNearestMaskPixel(mask, centerX, centerY) {
+    const maxRadius = Math.max(mask.width, mask.height);
+    if (mask.mask[centerY * mask.width + centerX]) return { x: centerX, y: centerY };
+    for (let radius = 1; radius <= maxRadius; radius += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const x = centerX + dx;
+        const top = centerY - radius;
+        const bottom = centerY + radius;
+        if (x >= 0 && x < mask.width && top >= 0 && top < mask.height
+            && mask.mask[top * mask.width + x]) return { x, y: top };
+        if (x >= 0 && x < mask.width && bottom >= 0 && bottom < mask.height
+            && mask.mask[bottom * mask.width + x]) return { x, y: bottom };
+      }
+      for (let dy = -radius + 1; dy < radius; dy += 1) {
+        const y = centerY + dy;
+        const left = centerX - radius;
+        const right = centerX + radius;
+        if (y >= 0 && y < mask.height && left >= 0 && left < mask.width
+            && mask.mask[y * mask.width + left]) return { x: left, y };
+        if (y >= 0 && y < mask.height && right >= 0 && right < mask.width
+            && mask.mask[y * mask.width + right]) return { x: right, y };
+      }
+    }
+    return null;
+  }
+
+  function estimateWallTangent(mask, centerX, centerY, bounds) {
+    const radius = 12;
+    const points = [];
+    for (let y = Math.max(0, centerY - radius); y <= Math.min(mask.height - 1, centerY + radius); y += 1) {
+      for (let x = Math.max(0, centerX - radius); x <= Math.min(mask.width - 1, centerX + radius); x += 1) {
+        if (mask.mask[y * mask.width + x]) points.push({ x, y });
+      }
+    }
+    if (points.length < 2) return null;
+    const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+    const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+    let xx = 0;
+    let yy = 0;
+    let xy = 0;
+    points.forEach((point) => {
+      const dx = point.x - meanX;
+      const dy = point.y - meanY;
+      xx += dx * dx;
+      yy += dy * dy;
+      xy += dx * dy;
+    });
+    const angle = 0.5 * Math.atan2(2 * xy, xx - yy);
+    const sceneX = Math.cos(angle) * (bounds.width / mask.width);
+    const sceneZ = Math.sin(angle) * (bounds.depth / mask.height);
+    const length = Math.hypot(sceneX, sceneZ);
+    if (length <= 0.0001) return null;
+    return { x: sceneX / length, z: sceneZ / length };
   }
 
   async function createGLBFurniturePivot(item) {
@@ -3601,6 +4006,14 @@
     }
   }
 
+  function findBestWallSnap(modelBox) {
+    const vectorSnap = findNearestWallSnap(modelBox);
+    const imageSnap = findNearestImageWallSnap(modelBox);
+    if (!vectorSnap) return imageSnap;
+    if (!imageSnap) return vectorSnap;
+    return vectorSnap.gap <= imageSnap.gap ? vectorSnap : imageSnap;
+  }
+
   function getOrientedWallSnap(modelBox, wall) {
     const params = wall.geometry && wall.geometry.parameters;
     if (!params) return null;
@@ -3637,6 +4050,7 @@
       gap: Math.max(0, gap),
       dx: normal.x * delta,
       dz: normal.z * delta,
+      rotationY: wall.rotation.y || 0,
     };
   }
 
@@ -3676,6 +4090,8 @@
               gap: Math.max(0, gap),
               dx: wallPoint.x + nx * targetDistance - center.x,
               dz: wallPoint.z + nz * targetDistance - center.z,
+              // 이미지 벽의 법선에 직교하는 방향으로 가구의 긴 축을 맞춘다.
+              rotationY: -Math.atan2(nx, -nz),
             };
           }
         }
@@ -3699,14 +4115,15 @@
     return reason ? { reason, box } : null;
   }
 
-  function getBlockedPlacementReason(model, box) {
+  function getBlockedPlacementReason(model, box, cachedFootprint, cachedWallFootprints) {
     if (isOutsideBounds(box)) return "평면도 경계 밖";
     if (boxIntersectsImageWall(box)) return "이미지 평면도 벽";
     if (boxIntersectsNonResidentialArea(box)) return "회색 비실사용 공간";
     if (boxOutsideImageFloor(box)) return "타일 바닥 영역 밖";
-    const modelFootprint = getPlanFootprint(model);
-    for (const wall of state.wallObjects) {
-      if (footprintsIntersect(modelFootprint, getPlanFootprint(wall))) return "벡터 벽체";
+    const modelFootprint = cachedFootprint || getPlanFootprint(model);
+    const wallFootprints = cachedWallFootprints || state.wallObjects.map((wall) => getPlanFootprint(wall));
+    for (const wallFootprint of wallFootprints) {
+      if (footprintsIntersect(modelFootprint, wallFootprint)) return "벡터 벽체";
     }
     return "";
   }
@@ -3827,23 +4244,39 @@
     if (extraMessage) warnings.push(extraMessage);
     if (state.blockedDragWarning) warnings.push(state.blockedDragWarning);
 
-    state.furnitureMeshes.forEach((model) => {
-      const box = getPlanBox(model);
-      const blockedReason = getBlockedPlacementReason(model, box);
+    const wallFootprints = state.wallObjects.map((wall) => getPlanFootprint(wall));
+    const entries = state.furnitureMeshes.map((model) => ({
+      model,
+      box: getPlanBox(model),
+      footprint: getPlanFootprint(model),
+    }));
+
+    entries.forEach((entry) => {
+      const blockedReason = getBlockedPlacementReason(
+        entry.model,
+        entry.box,
+        entry.footprint,
+        wallFootprints
+      );
       if (blockedReason) {
-        warnings.push(`${model.userData.label}이 ${blockedReason}과 간섭됩니다.`);
-        colliding.add(model);
+        warnings.push(`${entry.model.userData.label}이 ${blockedReason}과 간섭됩니다.`);
+        colliding.add(entry.model);
       }
     });
 
-    for (let i = 0; i < state.furnitureMeshes.length; i += 1) {
-      for (let j = i + 1; j < state.furnitureMeshes.length; j += 1) {
-        const a = state.furnitureMeshes[i];
-        const b = state.furnitureMeshes[j];
-        if (footprintsIntersect(getPlanFootprint(a), getPlanFootprint(b))) {
-          warnings.push(`${a.userData.label} / ${b.userData.label} 간 충돌`);
-          colliding.add(a);
-          colliding.add(b);
+    // X축 sweep-and-prune으로 멀리 떨어진 가구 쌍을 먼저 제외한다.
+    // 기존에는 모든 쌍마다 footprint와 Box3를 반복 생성했다.
+    entries.sort((a, b) => a.box.minX - b.box.minX);
+    for (let i = 0; i < entries.length; i += 1) {
+      for (let j = i + 1; j < entries.length; j += 1) {
+        const a = entries[i];
+        const b = entries[j];
+        if (b.box.minX >= a.box.maxX - COLLISION_EPSILON) break;
+        if (!boxesIntersect(a.box, b.box)) continue;
+        if (footprintsIntersect(a.footprint, b.footprint)) {
+          warnings.push(`${a.model.userData.label} / ${b.model.userData.label} 간 충돌`);
+          colliding.add(a.model);
+          colliding.add(b.model);
         }
       }
     }
@@ -3851,6 +4284,7 @@
     colliding.forEach((model) => addCollisionHelper(model));
     state.lastWarnings = unique(warnings).slice(0, 6);
     renderWarnings();
+    invalidateRender();
   }
 
   function getPlanBox(object) {
@@ -3988,19 +4422,15 @@
   }
 
   function updateEstimate() {
-    const placedCount = document.getElementById("placed-count");
     const totalEl = document.getElementById("estimate-total");
     const listEl = document.getElementById("estimate-list");
-    const activeTheme = document.getElementById("active-theme");
     const furnitureRows = getFurnitureEstimateRows();
     const floorRows = getFloorEstimateRows();
     const wallpaperRows = getWallpaperEstimateRows();
     const rows = [...furnitureRows, ...floorRows, ...wallpaperRows];
     const total = rows.reduce((sum, item) => sum + item.price, 0);
 
-    if (placedCount) placedCount.textContent = `${rows.length}개`;
     if (totalEl) totalEl.textContent = formatPrice(total);
-    if (activeTheme) activeTheme.textContent = state.activePattern;
     if (!listEl) return;
     listEl.innerHTML = "";
     if (rows.length === 0) {
@@ -4130,17 +4560,43 @@
     return Math.max(0, widthM * lengthM);
   }
 
-  function applyTrendPattern(pattern) {
+  async function applyTrendPattern(pattern) {
     state.activePattern = pattern.code;
     renderTrendPatterns();
     clearFurniture();
     state.suppressAutoSelect = true;
-    const picks = pattern.placements.map((placement) => {
-      return findCatalogItem(placement.category) || state.catalogItems[0];
-    }).filter(Boolean);
-    picks.forEach((item, index) => spawnFurniture(item, { ...pattern.placements[index], select: false }));
-    state.suppressAutoSelect = false;
-    updateSceneStatus("추천 패턴 적용", `${pattern.code} ${pattern.name} 기본 배치를 불러왔습니다.`);
+    let placedCount = 0;
+    const roomUseCount = new Map();
+    try {
+      // 순서대로 배치해야 먼저 놓인 가구와 겹치지 않는 다음 빈자리를 찾는다.
+      for (const placement of pattern.placements) {
+        const item = findCatalogItem(placement.category);
+        if (!item) continue;
+        const repeatCount = placement.eachRoom
+          ? Math.max(1, countRecognizedRooms(placement.targetRoom))
+          : 1;
+        for (let repeat = 0; repeat < repeatCount; repeat += 1) {
+          const roomKey = placement.targetRoom || placement.category;
+          const roomIndex = roomUseCount.get(roomKey) || 0;
+          await spawnFurniture(item, {
+            ...placement,
+            roomIndex,
+            autoPlace: true,
+            fastPlan: true,
+            wallPreferred: shouldPreferWallPlacement(placement.category),
+            select: false,
+          });
+          roomUseCount.set(roomKey, roomIndex + 1);
+          placedCount += 1;
+        }
+      }
+    } finally {
+      state.suppressAutoSelect = false;
+    }
+    updateSceneStatus(
+      "추천 패턴 적용",
+      `${pattern.code} ${pattern.name} 가구 ${placedCount}개를 실내에 배치했습니다.`
+    );
   }
 
   function findCatalogItem(category) {
@@ -4148,6 +4604,19 @@
       const categoryOk = !category || String(item.category || "").includes(category) || String(item.product_name || "").includes(category);
       return categoryOk;
     });
+  }
+
+  function countRecognizedRooms(roomType) {
+    if (!roomType) return 0;
+    return state.roomLabelObjects.filter(
+      (label) => label.userData && label.userData.roomType === roomType
+    ).length;
+  }
+
+  function shouldPreferWallPlacement(category) {
+    const value = String(category || "");
+    return ["침대", "소파", "책상", "수납장", "서랍장", "화장대", "냉장고"]
+      .some((keyword) => value.includes(keyword));
   }
 
   function clearFurniture() {
@@ -4239,13 +4708,19 @@
   }
 
   async function addRenderedFurnitureModel(group, planModel) {
+    if (!group || group !== state.visualizationGroup) return null;
     const item = exportCatalogLikeItem(planModel);
     try {
       const paths = resolveModelPaths(item);
       const gltf = await loadGltfWithFallback(paths);
+      const sourcePlanModel = planModel.userData.replacedBy || planModel;
+      if (group !== state.visualizationGroup || !group.parent
+          || !state.furnitureMeshes.includes(sourcePlanModel)) {
+        if (gltf && gltf.scene) disposeObject3D(gltf.scene);
+        return null;
+      }
       if (!gltf) {
-        addRenderedFurnitureFallback(group, planModel, item);
-        return;
+        return addRenderedFurnitureFallback(group, sourcePlanModel, item);
       }
 
       const model = gltf.scene;
@@ -4258,14 +4733,19 @@
       model.scale.set(targetW / Math.max(size.x, 0.001), targetH / Math.max(size.y, 0.001), targetD / Math.max(size.z, 0.001));
 
       const pivot = createCenteredFurniturePivot(model, item);
-      pivot.position.set(planModel.position.x, pivot.userData.centerY || 0, planModel.position.z);
-      pivot.rotation.y = planModel.rotation.y;
-      pivot.userData.sourcePlanModel = planModel;
+      pivot.position.set(sourcePlanModel.position.x, pivot.userData.centerY || 0, sourcePlanModel.position.z);
+      pivot.rotation.y = sourcePlanModel.rotation.y;
+      pivot.userData.sourcePlanModel = sourcePlanModel;
       state.renderedFurnitureMeshes.push(pivot);
       group.add(pivot);
+      invalidateRender();
+      return pivot;
     } catch (err) {
       console.warn("3D 가구 렌더링 중 대체 모델로 표시합니다.", err);
-      addRenderedFurnitureFallback(group, planModel, item);
+      const sourcePlanModel = planModel.userData.replacedBy || planModel;
+      if (group !== state.visualizationGroup || !group.parent
+          || !state.furnitureMeshes.includes(sourcePlanModel)) return null;
+      return addRenderedFurnitureFallback(group, sourcePlanModel, item);
     }
   }
 
@@ -4274,6 +4754,22 @@
     fallback.userData.sourcePlanModel = planModel;
     state.renderedFurnitureMeshes.push(fallback);
     group.add(fallback);
+    invalidateRender();
+    return fallback;
+  }
+
+  function removeRenderedFurnitureForPlan(planModel) {
+    const removed = state.renderedFurnitureMeshes.filter(
+      (rendered) => rendered.userData.sourcePlanModel === planModel
+    );
+    removed.forEach((rendered) => {
+      if (rendered.parent) rendered.parent.remove(rendered);
+      disposeObject3D(rendered);
+    });
+    state.renderedFurnitureMeshes = state.renderedFurnitureMeshes.filter(
+      (rendered) => rendered.userData.sourcePlanModel !== planModel
+    );
+    invalidateRender();
   }
 
   function createRenderedFurnitureBox(planModel, item) {
@@ -4292,18 +4788,11 @@
     return mesh;
   }
 
-  function loadGltfWithFallback(paths, index) {
-    index = index || 0;
-    const path = paths[index];
-    if (!path) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      gltfLoader.load(
-        path,
-        (gltf) => resolve(gltf),
-        undefined,
-        () => resolve(loadGltfWithFallback(paths, index + 1))
-      );
-    });
+  function loadGltfWithFallback(paths) {
+    // 성공/실패 Promise를 경로별로 캐시하고, 반환할 때는 독립된 geometry,
+    // material, texture를 복제한다. 같은 70~90MB GLB를 2D/3D 전환마다
+    // 다시 다운로드하고 파싱하는 비용을 제거하면서 개별 dispose도 안전하다.
+    return gltfCache.loadFirst(unique(paths || []));
   }
 
   function setPlanningFurnitureVisible(visible) {
@@ -4319,15 +4808,19 @@
   }
 
   function addRenderedWalls(group) {
+    let renderedFromMask = false;
     if (state.imageWallMask && state.floorBounds) {
       const renderedMask = createRenderedWallMaskMesh(state.imageWallMask, state.floorBounds, state.wallRenderRects);
       if (renderedMask) {
         group.add(renderedMask);
-        return;
+        renderedFromMask = true;
       }
     }
 
     state.wallObjects.forEach((wall) => {
+      // 추출된 구조벽은 위의 마스크 메시가 이미 렌더링한다. 사용자가 추가한
+      // 가벽은 이미지 마스크에 없으므로 별도 3D 벽으로 반드시 함께 만든다.
+      if (renderedFromMask && !isCustomPlanningWall(wall)) return;
       const params = wall.geometry && wall.geometry.parameters;
       if (!params) return;
       const height = (wall.userData.renderHeight || 2.4) * RENDERED_WALL_HEIGHT_RATIO;
@@ -4336,6 +4829,15 @@
       rendered.quaternion.copy(wall.quaternion);
       group.add(rendered);
     });
+  }
+
+  function isCustomPlanningWall(wall) {
+    return Boolean(
+      wall
+      && wall.userData
+      && !wall.userData.hitOnly
+      && !wall.userData.source
+    );
   }
 
   function createRenderedWallMaskMesh(maskData, bounds, rectData) {
@@ -4493,15 +4995,65 @@
       state.renderMode = "2d";
     }
     updateRenderModeButtons();
+    invalidateRender();
   }
 
-  function saveLayout() {
+  function openSaveLayoutDialog() {
+    const dialog = document.getElementById("save-layout-dialog");
+    const input = document.getElementById("layout-name-input");
+    if (!dialog || !input) return;
+    const today = new Date().toISOString().slice(0, 10);
+    input.value = `인테리어 배치-${today}`;
+    dialog.showModal();
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  }
+
+  function openLayoutFilePicker() {
+    const input = document.getElementById("layoutFileInput");
+    if (!input) return;
+    input.value = "";
+    input.click();
+  }
+
+  async function handleLayoutFileSelected(event) {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      await restoreLayout(payload);
+      updateSceneStatus("불러오기 완료", `${payload.name || file.name} 배치를 복원했습니다.`);
+    } catch (err) {
+      console.error(err);
+      alert(`배치 파일을 불러오지 못했습니다: ${err.message}`);
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function saveLayout(requestedName) {
+    const layoutName = normalizeLayoutName(requestedName);
     const payload = {
+      schema: "duo-layout",
+      version: 3,
+      name: layoutName,
       savedAt: new Date().toISOString(),
+      floorPlan: state.currentPlanData,
       activePattern: state.activePattern,
       activeFloorMaterial: state.activeFloorMaterial,
       activeWallMaterial: state.activeWallMaterial,
-      floorBounds: state.floorBounds,
+      floorBounds: serializeFloorBounds(state.floorBounds),
+      rooms: state.roomObjects.map((room) => ({
+        id: room.userData.id,
+        floorMaterial: room.userData.floorMaterial,
+        floorMaterialApplied: Boolean(room.userData.floorMaterialApplied),
+        wallMaterial: room.userData.wallMaterial,
+      })),
+      customWalls: state.wallObjects
+        .filter(isCustomPlanningWall)
+        .map(serializeCustomWall),
       items: state.furnitureMeshes.map((model) => ({
         skuId: model.userData.skuId,
         label: model.userData.label,
@@ -4510,40 +5062,146 @@
         item: exportCatalogLikeItem(model),
       })),
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    downloadBlob(JSON.stringify(payload, null, 2), "duo-layout.json", "application/json");
-    updateSceneStatus("저장 완료", "브라우저 저장소와 duo-layout.json 파일로 현재 배치를 저장했습니다.");
+    const serialized = JSON.stringify(payload, null, 2);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch (err) {
+      // 큰 평면도는 브라우저 저장 한도를 넘을 수 있지만 파일 저장은 계속한다.
+      console.warn("최근 배치 백업을 브라우저에 저장하지 못했습니다.", err);
+    }
+    const filename = `${sanitizeFilename(layoutName)}.duo.json`;
+    downloadBlob(serialized, filename, "application/json");
+    updateSceneStatus("저장 완료", `${filename} 파일로 현재 배치를 저장했습니다.`);
   }
 
-  function loadSavedLayout() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      alert("저장된 배치가 없습니다.");
-      return;
+  function normalizeLayoutName(value) {
+    return String(value || "")
+      .replace(/\.duo\.json$/i, "")
+      .replace(/\.json$/i, "")
+      .trim() || "인테리어 배치";
+  }
+
+  function sanitizeFilename(value) {
+    return normalizeLayoutName(value)
+      .replace(/[\\/:*?"<>|]/g, "-")
+      .replace(/\s+/g, " ")
+      .slice(0, 80);
+  }
+
+  function serializeFloorBounds(bounds) {
+    if (!bounds) return null;
+    return {
+      minX: bounds.minX,
+      maxX: bounds.maxX,
+      minZ: bounds.minZ,
+      maxZ: bounds.maxZ,
+    };
+  }
+
+  function serializeCustomWall(wall) {
+    const params = wall.geometry && wall.geometry.parameters;
+    return {
+      id: wall.userData.id,
+      label: wall.userData.label,
+      position: { x: wall.position.x, z: wall.position.z },
+      rotationY: wall.rotation.y,
+      length: params ? Number(params.width) || 0 : 0,
+      thickness: params ? Number(params.depth) || 0.14 : 0.14,
+      height: Number(wall.userData.renderHeight) || 2.4,
+      wallMaterial: wall.userData.wallMaterial || state.activeWallMaterial,
+      wallpaperApplied: Boolean(wall.userData.wallpaperApplied),
+    };
+  }
+
+  function restoreCustomWalls(savedWalls) {
+    if (!Array.isArray(savedWalls) || !state.floorPlanGroup) return;
+    savedWalls.forEach((saved, index) => {
+      const length = Math.max(Number(saved.length) || 0, 0.12);
+      const rotationY = Number(saved.rotationY) || 0;
+      const centerX = Number(saved.position && saved.position.x) || 0;
+      const centerZ = Number(saved.position && saved.position.z) || 0;
+      const dx = Math.cos(rotationY) * length;
+      const dz = -Math.sin(rotationY) * length;
+      const start = new THREE.Vector3(centerX - dx / 2, 0, centerZ - dz / 2);
+      const end = new THREE.Vector3(centerX + dx / 2, 0, centerZ + dz / 2);
+      const wall = createPlanningWallMesh(
+        start,
+        end,
+        Math.max(Number(saved.thickness) || 0.14, 0.04),
+        Math.max(Number(saved.height) || 2.4, 0.2),
+        {
+          id: saved.id || `wall_custom_restored_${index}`,
+          label: saved.label || "사용자 벽",
+          editable: true,
+          source: null,
+        }
+      );
+      wall.userData.wallMaterial = saved.wallMaterial || state.activeWallMaterial;
+      wall.userData.wallpaperApplied = Boolean(saved.wallpaperApplied);
+      state.floorPlanGroup.add(wall);
+      state.wallObjects.push(wall);
+    });
+  }
+
+  async function restoreLayout(payload) {
+    if (!payload || typeof payload !== "object") {
+      throw new Error("올바른 배치 JSON이 아닙니다.");
     }
+    if (payload.schema && payload.schema !== "duo-layout") {
+      throw new Error("평면도 파일이 아니라 배치 저장 파일을 선택해주세요.");
+    }
+    if (payload.floorPlan) {
+      loadFloorPlan(payload.floorPlan);
+      getCanvasContainer().classList.add("has-plan");
+    }
+    clearFurniture();
+    if (payload.floorBounds && !payload.floorPlan) setFloorBounds(payload.floorBounds);
+    state.activePattern = payload.activePattern || "A";
+    state.activeFloorMaterial = payload.activeFloorMaterial || state.activeFloorMaterial;
+    state.activeWallMaterial = payload.activeWallMaterial || state.activeWallMaterial;
+    restoreCustomWalls(payload.customWalls);
+    await applyFloorMaterial();
+    await applyWallMaterial();
+
+    const savedRooms = new Map(
+      (Array.isArray(payload.rooms) ? payload.rooms : []).map((room) => [room.id, room])
+    );
+    const changedRooms = [];
+    state.roomObjects.forEach((room) => {
+      const saved = savedRooms.get(room.userData.id);
+      if (!saved) return;
+      room.userData.floorMaterial = saved.floorMaterial || state.activeFloorMaterial;
+      room.userData.floorMaterialApplied = Boolean(saved.floorMaterialApplied);
+      room.userData.wallMaterial = saved.wallMaterial || state.activeWallMaterial;
+      changedRooms.push(room);
+    });
+    if (changedRooms.length > 0) refreshRoomFloorMaterials(changedRooms);
+
+    renderFloorMaterials();
+    renderWallMaterials();
+    renderTrendPatterns();
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    state.suppressAutoSelect = true;
     try {
-      const payload = JSON.parse(raw);
-      clearFurniture();
-      if (payload.floorBounds) setFloorBounds(payload.floorBounds);
-      state.activePattern = payload.activePattern || "A";
-      state.activeFloorMaterial = payload.activeFloorMaterial || state.activeFloorMaterial;
-      state.activeWallMaterial = payload.activeWallMaterial || state.activeWallMaterial;
-      applyFloorMaterial();
-      applyWallMaterial();
-      renderFloorMaterials();
-      renderWallMaterials();
-      renderTrendPatterns();
-      state.suppressAutoSelect = true;
-      payload.items.forEach((entry) => {
-        const item = state.catalogItems.find((catalogItem) => catalogItem.sku_id === entry.skuId) || entry.item;
-        spawnFurniture({ ...item, label: entry.label }, { x: entry.position.x, z: entry.position.z, rot: entry.rotationY, select: false });
-      });
+      await Promise.all(items.map((entry) => {
+        const item = state.catalogItems.find(
+          (catalogItem) => catalogItem.sku_id === entry.skuId
+        ) || entry.item;
+        if (!item || !entry.position) return Promise.resolve();
+        return spawnFurniture(
+          { ...item, label: entry.label },
+          {
+            x: Number(entry.position.x) || 0,
+            z: Number(entry.position.z) || 0,
+            rot: Number(entry.rotationY) || 0,
+            select: false,
+          }
+        );
+      }));
+    } finally {
       state.suppressAutoSelect = false;
-      updateSceneStatus("불러오기 완료", "저장된 배치를 복원했습니다.");
-    } catch (err) {
-      console.error(err);
-      alert("저장 데이터를 불러오지 못했습니다.");
     }
+    updateEstimate();
   }
 
   function exportCatalogLikeItem(model) {
@@ -4738,11 +5396,19 @@
     state.camera.aspect = container.clientWidth / container.clientHeight;
     state.camera.updateProjectionMatrix();
     state.renderer.setSize(container.clientWidth, container.clientHeight);
+    state.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+    invalidateRender();
+  }
+
+  function invalidateRender() {
+    state.needsRender = true;
   }
 
   function animate() {
     requestAnimationFrame(animate);
-    state.controls.update();
+    const controlsChanged = state.controls.update();
+    if (!state.needsRender && !controlsChanged) return;
+    state.needsRender = false;
     state.renderer.render(state.scene, state.camera);
   }
 
@@ -4762,11 +5428,15 @@
     const categoryDir = resolveModelCategoryDir(item);
     const modelName = sanitizeModelFileName(getItemName(item));
     if (categoryDir && modelName) {
-      const categoryVariants = unique([categoryDir, categoryDir.normalize("NFD"), categoryDir.normalize("NFC")]);
-      const nameVariants = unique([modelName, modelName.normalize("NFD"), modelName.normalize("NFC")]);
-      categoryVariants.forEach((category) => {
-        nameVariants.forEach((name) => paths.push(`/static/models/${category}/${name}.glb`));
-      });
+      appendNormalizedModelPaths(paths, categoryDir, modelName);
+    }
+
+    // DB 상품명과 GLB 파일명이 일치하지 않는 데이터도 추천 결과가 단순
+    // 사각형으로 남지 않도록, 종류별로 반드시 존재하는 대표 모델을 사용한다.
+    const fallbackName = getCategoryFallbackModelName(categoryDir);
+    if (categoryDir && fallbackName
+        && fallbackName.normalize("NFC") !== modelName.normalize("NFC")) {
+      appendNormalizedModelPaths(paths, categoryDir, fallbackName);
     }
 
     // 과거 table/, gaming_chair/, bed/, sofa/ 폴더용 fallback은 현재 저장소에
@@ -4774,6 +5444,26 @@
     // 때마다 여러 404 요청을 순차 대기하므로 제거했다. 실제 한글 카테고리
     // 폴더의 제품명과 default 설비 경로만 후보로 유지한다.
     return unique(paths.filter(Boolean));
+  }
+
+  function appendNormalizedModelPaths(paths, category, name) {
+    const categoryVariants = unique([category, category.normalize("NFD"), category.normalize("NFC")]);
+    const nameVariants = unique([name, name.normalize("NFD"), name.normalize("NFC")]);
+    categoryVariants.forEach((categoryName) => {
+      nameVariants.forEach((modelName) => {
+        paths.push(`/static/models/${categoryName}/${modelName}.glb`);
+      });
+    });
+  }
+
+  function getCategoryFallbackModelName(category) {
+    switch (category) {
+      case "소파": return "GLOSTAD 글로스타드";
+      case "침대": return "MALM 말름";
+      case "식탁": return "LISABO 리사보";
+      case "의자": return "BERGMUND 베리문드";
+      default: return "";
+    }
   }
 
   function resolveDefaultFixtureModelPath(item) {

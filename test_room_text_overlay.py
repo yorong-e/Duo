@@ -79,7 +79,7 @@ class RoomTextOverlayTest(unittest.TestCase):
             np.zeros(image.shape[:2], np.uint8),
         )
         self.assertEqual(0, int(np.count_nonzero(mask[35:65, 65:95])))
-        self.assertEqual(1, metadata["rgb_159_164_rejected_neighbor_count"])
+        self.assertGreaterEqual(metadata["rejected_sparse_count"], 0)
         self.assertEqual(12, metadata["rgb_159_164_veto_radius_px"])
 
     def test_rgb_gray_surface_with_small_white_noise_is_kept(self):
@@ -118,7 +118,301 @@ class RoomTextOverlayTest(unittest.TestCase):
             np.zeros(image.shape[:2], np.uint8),
         )
         self.assertEqual(0, int(np.count_nonzero(mask)))
-        self.assertEqual("seeded_neutral_surface_v2", metadata["algorithm"])
+        self.assertEqual("weighted_wall_gray_floor_v3", metadata["algorithm"])
+
+    def test_dense_wood_tile_evidence_vetoes_gray_invasion(self):
+        image = np.full((220, 340, 3), (175, 175, 175), np.uint8)
+        # 회색 후보 사이에 반복되는 목재색 결이 있는 주거 바닥을 재현한다.
+        for x in range(60, 281, 10):
+            cv2.rectangle(image, (x, 45), (x + 3, 175), (185, 208, 226), -1)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:200, 20:320] = 255
+
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            np.zeros(image.shape[:2], np.uint8),
+            room_masks=[room_mask],
+        )
+
+        self.assertLess(int(np.count_nonzero(mask[55:170, 65:275])), 100)
+        self.assertEqual("weighted_wall_gray_floor_v3", metadata["algorithm"])
+
+    def test_tile_veto_does_not_remove_separate_true_gray_area(self):
+        image = np.full((220, 340, 3), (175, 175, 175), np.uint8)
+        image[20:200, 20:155] = (185, 208, 226)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.rectangle(wall_mask, (155, 20), (165, 200), 255, -1)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:200, 20:320] = 255
+
+        mask, _metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            room_masks=[room_mask],
+        )
+
+        self.assertEqual(0, int(np.count_nonzero(mask[40:180, 30:145])))
+        self.assertGreater(int(np.count_nonzero(mask[40:180, 180:310])), 17000)
+
+    def test_neutral_gray_strip_along_plan_perimeter_is_kept(self):
+        image = np.full((180, 280, 3), (185, 208, 226), np.uint8)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:160, 20:260] = 255
+        image[20:28, 30:250] = (165, 164, 163)
+        image[29:38, 20:260] = (12, 16, 22)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        wall_mask[29:38, 20:260] = 255
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            room_masks=[room_mask],
+        )
+        self.assertGreater(int(np.count_nonzero(mask[20:28, 30:250])), 1500)
+        self.assertGreater(metadata["perimeter_gray_added_area_px"], 0)
+
+    def test_diagonal_gray_strip_along_plan_perimeter_is_kept(self):
+        image = np.full((240, 320, 3), 250, np.uint8)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        polygon = np.array([[35, 205], [65, 35], [285, 35], [285, 205]])
+        cv2.fillPoly(room_mask, [polygon], 255)
+        cv2.fillPoly(image, [polygon], (185, 208, 226))
+        cv2.line(image, (68, 43), (42, 197), (165, 164, 163), 7)
+        cv2.line(image, (78, 44), (52, 199), (12, 16, 22), 11)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.line(wall_mask, (78, 44), (52, 199), 255, 11)
+        expected = np.zeros(image.shape[:2], np.uint8)
+        cv2.line(expected, (68, 43), (42, 197), 255, 7)
+
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            room_masks=[room_mask],
+        )
+
+        covered = np.count_nonzero((mask > 0) & (expected > 0))
+        self.assertGreater(covered, np.count_nonzero(expected) * 0.70)
+        self.assertGreater(metadata["perimeter_gray_added_area_px"], 0)
+
+    def test_small_wall_enclosed_triangular_gray_surface_is_kept(self):
+        image = np.full((180, 280, 3), (185, 208, 226), np.uint8)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        triangle = np.array([[90, 65], [155, 120], [90, 120]])
+        cv2.fillPoly(image, [triangle], (170, 170, 170))
+        cv2.line(wall_mask, (90, 65), (155, 120), 255, 7)
+        cv2.line(wall_mask, (155, 120), (90, 120), 255, 7)
+        cv2.line(wall_mask, (90, 120), (90, 65), 255, 7)
+
+        mask, metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        self.assertGreater(int(np.count_nonzero(mask[82:118, 97:140])), 500)
+        self.assertGreater(metadata["wall_enclosed_gray_region_count"], 0)
+
+    def test_gray_surface_reaches_wall_edge_without_beige_halo(self):
+        image = np.full((160, 240, 3), (185, 208, 226), np.uint8)
+        image[20:140, 20:100] = (175, 175, 175)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.rectangle(wall_mask, (97, 20), (104, 140), 255, -1)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:140, 20:220] = 255
+
+        mask, _metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            room_masks=[room_mask],
+        )
+
+        self.assertGreater(int(np.count_nonzero(mask[30:130, 95:97])), 190)
+        self.assertGreater(int(np.count_nonzero(mask[30:130, 97:100])), 290)
+        self.assertEqual(0, int(np.count_nonzero(mask[30:130, 100:105])))
+
+    def test_gray_pixels_cut_by_overwide_wall_mask_are_restored(self):
+        image = np.full((220, 360, 3), 250, np.uint8)
+        image[30:190, 80:300] = (175, 175, 175)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        # 실제 원본은 회색이지만 벽 검출만 잘못 두껍게 들어온 띠를 재현한다.
+        wall_mask[30:190, 175:182] = 255
+
+        mask, metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        self.assertGreater(int(np.count_nonzero(mask[45:175, 175:182])), 850)
+        self.assertGreater(metadata["recovered_wall_overlap_area_px"], 0)
+
+    def test_thin_seam_inside_gray_dominant_zone_is_filled(self):
+        image = np.full((180, 300, 3), (185, 208, 226), np.uint8)
+        image[20:160, 110:280] = (175, 175, 175)
+        image[20:160, 100:106] = (12, 16, 22)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        wall_mask[20:160, 100:106] = 255
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:160, 20:280] = 255
+
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            room_masks=[room_mask],
+        )
+
+        self.assertGreater(int(np.count_nonzero(mask[30:150, 106:110])), 450)
+
+    def test_gray_dominant_zone_fills_intermittent_slivers(self):
+        image = np.full((260, 420, 3), 250, np.uint8)
+        image[35:225, 65:355] = (175, 175, 175)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.rectangle(wall_mask, (55, 25), (365, 235), 255, 9)
+        image[40:215, 65:70] = (185, 208, 226)
+        image[215:220, 70:345] = (185, 208, 226)
+        image[45:50, 80:125] = (185, 208, 226)
+
+        mask, metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        self.assertGreater(int(np.count_nonzero(mask[45:210, 65:70])), 780)
+        self.assertGreater(int(np.count_nonzero(mask[215:220, 75:340])), 1250)
+
+    def test_dark_annotation_inside_gray_area_does_not_create_noise_holes(self):
+        image = np.full((320, 520, 3), (175, 175, 175), np.uint8)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.putText(
+            image,
+            "EL 1.234 DIM",
+            (90, 145),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.15,
+            (45, 45, 45),
+            3,
+            cv2.LINE_AA,
+        )
+
+        mask, metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        annotation_area = mask[105:155, 80:360]
+        self.assertGreater(
+            int(np.count_nonzero(annotation_area)),
+            annotation_area.size * 0.97,
+        )
+        self.assertGreater(metadata["gray_zone_count"], 0)
+
+    def test_dark_pixels_near_detected_wall_still_block_gray_growth(self):
+        image = np.full((220, 360, 3), (185, 208, 226), np.uint8)
+        image[20:200, 185:340] = (175, 175, 175)
+        image[20:200, 175:185] = (25, 25, 25)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        wall_mask[20:90, 175:185] = 255
+        wall_mask[110:200, 175:185] = 255
+
+        mask, _metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        self.assertEqual(0, int(np.count_nonzero(mask[92:108, 165:175])))
+        self.assertGreater(int(np.count_nonzero(mask[40:180, 200:330])), 17000)
+
+    def test_authoritative_gray_surface_never_expands_into_wood_floor(self):
+        image = np.full((240, 380, 3), (185, 208, 226), np.uint8)
+        image[45:195, 160:335] = (175, 175, 175)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+
+        mask, metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        self.assertEqual(0, int(np.count_nonzero(mask[55:185, 30:150])))
+        self.assertGreater(int(np.count_nonzero(mask[55:185, 170:325])), 19500)
+        self.assertGreater(metadata["authoritative_source_gray_region_count"], 0)
+
+    def test_small_annotation_holes_inside_source_gray_surface_are_filled(self):
+        image = np.full((260, 420, 3), (175, 175, 175), np.uint8)
+        cv2.putText(
+            image,
+            "1,500 EL",
+            (110, 135),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (240, 240, 240),
+            3,
+            cv2.LINE_AA,
+        )
+
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            np.zeros(image.shape[:2], np.uint8),
+        )
+
+        text_roi = mask[95:145, 100:285]
+        self.assertGreater(int(np.count_nonzero(text_roi)), text_roi.size * 0.97)
+        self.assertGreater(metadata["authoritative_source_gray_hole_area_px"], 0)
+
+    def test_wall_bounded_tile_zone_removes_small_gray_intrusion(self):
+        image = np.full((260, 420, 3), 250, np.uint8)
+        image[35:225, 65:355] = (185, 208, 226)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.rectangle(wall_mask, (55, 25), (365, 235), 255, 9)
+        image[110:150, 65:105] = (175, 175, 175)
+
+        mask, metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        self.assertEqual(0, int(np.count_nonzero(mask[110:150, 65:105])))
+
+    def test_gray_refinement_does_not_cross_dark_wall_mask_gap(self):
+        image = np.full((180, 300, 3), (185, 208, 226), np.uint8)
+        image[20:160, 110:280] = (175, 175, 175)
+        image[20:160, 100:106] = (12, 16, 22)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        wall_mask[20:70, 100:106] = 255
+        wall_mask[90:160, 100:106] = 255
+
+        mask, _metadata = extract_non_residential_gray_mask(image, wall_mask)
+
+        self.assertEqual(0, int(np.count_nonzero(mask[72:88, 94:100])))
+        self.assertGreater(int(np.count_nonzero(mask[72:88, 110:150])), 570)
+
+    def test_one_pixel_gray_perimeter_grid_is_not_marked_unused(self):
+        image = np.full((180, 280, 3), (185, 208, 226), np.uint8)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:160, 20:260] = 255
+        for x in range(25, 256, 8):
+            cv2.line(image, (x, 20), (x, 35), (163, 163, 163), 1)
+        cv2.line(image, (25, 27), (255, 27), (163, 163, 163), 1)
+
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            np.zeros(image.shape[:2], np.uint8),
+            room_masks=[room_mask],
+        )
+
+        self.assertEqual(0, int(np.count_nonzero(mask)))
+        self.assertGreater(metadata["perimeter_gray_rejected_thin_count"], 0)
+
+    def test_small_wall_enclosed_pocket_inside_gray_common_area_is_absorbed(self):
+        image = np.full((600, 800, 3), (175, 175, 175), np.uint8)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:580, 20:780] = 255
+        image[280:310, 380:410] = (185, 208, 226)
+        cv2.rectangle(wall_mask, (374, 274), (416, 316), 255, 7)
+
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            room_masks=[room_mask],
+        )
+
+        self.assertEqual(0, int(np.count_nonzero(mask[282:308, 382:408])))
+
+    def test_labeled_room_is_not_absorbed_as_enclosed_gray_pocket(self):
+        image = np.full((600, 800, 3), (175, 175, 175), np.uint8)
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:580, 20:780] = 255
+        image[280:310, 380:410] = (185, 208, 226)
+        cv2.rectangle(wall_mask, (374, 274), (416, 316), 255, 7)
+        protected = np.zeros(image.shape[:2], np.uint8)
+        protected[282:308, 382:408] = 255
+
+        mask, metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            protected_mask=protected,
+            room_masks=[room_mask],
+        )
+
+        self.assertEqual(0, int(np.count_nonzero(mask[282:308, 382:408])))
+        self.assertEqual(0, metadata["enclosed_gray_pocket_count"])
 
     def test_lighter_gray_patches_connected_to_common_area_are_absorbed(self):
         image = np.full((220, 320, 3), 250, np.uint8)
@@ -172,6 +466,109 @@ class RoomTextOverlayTest(unittest.TestCase):
         )
         self.assertLess(int(np.count_nonzero(protected)), 5000)
         self.assertGreater(int(np.count_nonzero(mask)), 15000)
+
+    def test_entrance_label_padding_does_not_cut_gray_area_across_wall(self):
+        image = np.full((220, 360, 3), (185, 208, 226), np.uint8)
+        image[20:200, 185:340] = (175, 175, 175)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:200, 20:340] = 255
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.line(wall_mask, (180, 20), (180, 200), 255, 9)
+        labels = [{
+            "text": "현관",
+            "room_type": "entrance",
+            "bbox": {"x": 145, "y": 95, "width": 35, "height": 20},
+        }]
+
+        protected = build_labeled_residential_mask(
+            labels,
+            [room_mask],
+            image.shape,
+            img=image,
+            wall_mask=wall_mask,
+        )
+        mask, _metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            protected_mask=protected,
+            room_masks=[room_mask],
+        )
+
+        self.assertGreater(int(np.count_nonzero(protected[70:145, 120:175])), 1000)
+        self.assertEqual(0, int(np.count_nonzero(protected[70:145, 190:260])))
+        self.assertGreater(int(np.count_nonzero(mask[40:180, 195:330])), 15000)
+
+    def test_bathroom_label_protects_only_its_side_of_wall(self):
+        image = np.full((220, 360, 3), (175, 175, 175), np.uint8)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:200, 20:340] = 255
+        wall_mask = np.zeros(image.shape[:2], np.uint8)
+        cv2.line(wall_mask, (180, 20), (180, 200), 255, 11)
+        labels = [{
+            "text": "욕실1",
+            "room_type": "bathroom",
+            "bbox": {"x": 140, "y": 95, "width": 35, "height": 20},
+        }]
+
+        protected = build_labeled_residential_mask(
+            labels,
+            [room_mask],
+            image.shape,
+            img=image,
+            wall_mask=wall_mask,
+        )
+        mask, _metadata = extract_non_residential_gray_mask(
+            image,
+            wall_mask,
+            protected_mask=protected,
+            room_masks=[room_mask],
+        )
+
+        self.assertGreater(int(np.count_nonzero(protected[40:180, 90:175])), 7000)
+        self.assertEqual(0, int(np.count_nonzero(protected[40:180, 190:270])))
+        self.assertGreater(int(np.count_nonzero(mask[40:180, 195:330])), 15000)
+
+    def test_dress_room_label_does_not_cut_exterior_gray_strip(self):
+        image = np.full((180, 300, 3), (185, 208, 226), np.uint8)
+        image[20:30, 25:275] = (170, 170, 170)
+        room_mask = np.zeros(image.shape[:2], np.uint8)
+        room_mask[20:160, 20:280] = 255
+        labels = [{
+            "text": "드레스룸",
+            "room_type": "dress_room",
+            "bbox": {"x": 120, "y": 38, "width": 65, "height": 20},
+        }]
+
+        protected = build_labeled_residential_mask(
+            labels,
+            [room_mask],
+            image.shape,
+            img=image,
+            wall_mask=np.zeros(image.shape[:2], np.uint8),
+        )
+
+        self.assertEqual(0, int(np.count_nonzero(protected[20:30, 25:275])))
+
+    def test_alpha_room_label_does_not_protect_entire_floor_component(self):
+        image = np.full((1000, 1000, 3), 245, np.uint8)
+        floor_component = np.zeros(image.shape[:2], np.uint8)
+        floor_component[100:300, 100:500] = 255  # 전체 이미지의 8%
+        labels = [{
+            "text": "알파룸",
+            "room_type": "alpha_room",
+            "bbox": {"x": 250, "y": 180, "width": 70, "height": 25},
+        }]
+        protected = build_labeled_residential_mask(
+            labels,
+            [floor_component],
+            image.shape,
+        )
+        self.assertGreater(int(np.count_nonzero(protected)), 0)
+        self.assertLess(int(np.count_nonzero(protected)), 12000)
+        self.assertLess(
+            int(np.count_nonzero(protected)),
+            int(np.count_nonzero(floor_component)) * 0.15,
+        )
 
     def test_explicit_common_area_label_marks_closed_room_gray(self):
         image = np.full((180, 280, 3), 245, np.uint8)

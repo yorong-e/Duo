@@ -3,12 +3,22 @@ package com.duo.app.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.FileSystemUtils;
@@ -18,9 +28,21 @@ import org.springframework.web.multipart.MultipartFile;
 public class FloorplanService {
 
     private static final String VECTORIZE_SCRIPT = "build_editable_floorplan.py";
+    private static final String CACHE_VERSION = "floorplan-v1";
+    private static final int MAX_CACHE_ENTRIES = 12;
+    private static final int MAX_CONCURRENT_VECTORIZERS = 2;
+    private static final long VECTORIZER_TIMEOUT_SECONDS = 180;
 
     private final ObjectMapper objectMapper;
     private final String pythonCommand;
+    private final Semaphore vectorizerSlots = new Semaphore(MAX_CONCURRENT_VECTORIZERS, true);
+    private final ConcurrentHashMap<String, CompletableFuture<JsonNode>> inFlight = new ConcurrentHashMap<>();
+    private final Map<String, JsonNode> resultCache = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, JsonNode> eldest) {
+            return size() > MAX_CACHE_ENTRIES;
+        }
+    };
 
     public FloorplanService(ObjectMapper objectMapper,
                             @Value("${floorplan.python.command:python3}") String pythonCommand) {
@@ -48,14 +70,36 @@ public class FloorplanService {
             Path output = tempDir.resolve("editable-floorplan.json");
             file.transferTo(input);
 
-            List<String> command = buildVectorizeCommand(script, input, output);
-            runVectorizer(command, workDir);
-
-            JsonNode result = objectMapper.readTree(output.toFile());
-            if (result instanceof com.fasterxml.jackson.databind.node.ObjectNode objectNode) {
-                objectNode.put("serverVectorizedAt", Instant.now().toString());
+            String cacheKey = sha256(input);
+            JsonNode cached = getCached(cacheKey);
+            if (cached != null) {
+                return decorateResult(cached, true);
             }
-            return result;
+
+            CompletableFuture<JsonNode> ownFuture = new CompletableFuture<>();
+            CompletableFuture<JsonNode> existingFuture = inFlight.putIfAbsent(cacheKey, ownFuture);
+            if (existingFuture != null) {
+                return decorateResult(awaitResult(existingFuture), true);
+            }
+
+            boolean acquired = false;
+            try {
+                vectorizerSlots.acquire();
+                acquired = true;
+                List<String> command = buildVectorizeCommand(script, input, output);
+                runVectorizer(command, workDir);
+
+                JsonNode result = objectMapper.readTree(output.toFile());
+                putCached(cacheKey, result);
+                ownFuture.complete(result.deepCopy());
+                return decorateResult(result, false);
+            } catch (IOException | InterruptedException | RuntimeException ex) {
+                ownFuture.completeExceptionally(ex);
+                throw ex;
+            } finally {
+                if (acquired) vectorizerSlots.release();
+                inFlight.remove(cacheKey, ownFuture);
+            }
         } finally {
             FileSystemUtils.deleteRecursively(tempDir);
         }
@@ -79,19 +123,84 @@ public class FloorplanService {
      */
     private void runVectorizer(List<String> command, Path workDir) throws IOException, InterruptedException {
         Process process;
+        Path logFile = Files.createTempFile("duo-vectorizer-", ".log");
         try {
             process = new ProcessBuilder(command)
                     .directory(workDir.toFile())
                     .redirectErrorStream(true)
+                    .redirectOutput(logFile.toFile())
                     .start();
         } catch (IOException ex) {
+            Files.deleteIfExists(logFile);
             throw new IllegalStateException("Python 벡터화 프로세스를 시작하지 못했습니다. command=" + command, ex);
         }
-        String log = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        int exitCode = process.waitFor();
-        if (exitCode != 0) {
-            throw new IllegalStateException("평면도 벡터화 실패(exit=" + exitCode + ", command=" + command + "): " + log);
+        try {
+            boolean finished = process.waitFor(VECTORIZER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroy();
+                if (!process.waitFor(5, TimeUnit.SECONDS)) process.destroyForcibly();
+                throw new IllegalStateException("평면도 분석 제한 시간(" + VECTORIZER_TIMEOUT_SECONDS + "초)을 초과했습니다.");
+            }
+            int exitCode = process.exitValue();
+            if (exitCode != 0) {
+                String log = Files.readString(logFile);
+                if (log.length() > 20_000) log = log.substring(log.length() - 20_000);
+                throw new IllegalStateException("평면도 벡터화 실패(exit=" + exitCode + ", command=" + command + "): " + log);
+            }
+        } catch (InterruptedException ex) {
+            process.destroyForcibly();
+            Thread.currentThread().interrupt();
+            throw ex;
+        } finally {
+            Files.deleteIfExists(logFile);
         }
+    }
+
+    private String sha256(Path input) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(CACHE_VERSION.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try (InputStream stream = Files.newInputStream(input)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = stream.read(buffer)) >= 0) {
+                    if (count > 0) digest.update(buffer, 0, count);
+                }
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256을 사용할 수 없습니다.", ex);
+        }
+    }
+
+    private synchronized JsonNode getCached(String key) {
+        JsonNode result = resultCache.get(key);
+        return result == null ? null : result.deepCopy();
+    }
+
+    private synchronized void putCached(String key, JsonNode value) {
+        resultCache.put(key, value.deepCopy());
+    }
+
+    private JsonNode awaitResult(CompletableFuture<JsonNode> future) throws IOException, InterruptedException {
+        try {
+            return future.get().deepCopy();
+        } catch (ExecutionException ex) {
+            Throwable cause = ex.getCause();
+            if (cause instanceof IOException ioException) throw ioException;
+            if (cause instanceof InterruptedException interruptedException) throw interruptedException;
+            if (cause instanceof RuntimeException runtimeException) throw runtimeException;
+            throw new IllegalStateException("동일 평면도 분석 작업이 실패했습니다.", cause);
+        }
+    }
+
+    private JsonNode decorateResult(JsonNode source, boolean cacheHit) {
+        JsonNode result = source.deepCopy();
+        if (result instanceof com.fasterxml.jackson.databind.node.ObjectNode objectNode) {
+            objectNode.put("serverVectorizedAt", Instant.now().toString());
+            objectNode.put("serverCacheHit", cacheHit);
+        }
+        return result;
     }
 
     private String safeName(String originalName, String fallback) {

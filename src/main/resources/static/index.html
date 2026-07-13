@@ -6,7 +6,7 @@
   <title>Hyundai Engineering - 3D Space Simulator</title>
 
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-  <link rel="stylesheet" href="/static/css/style.css?v=4">
+  <link rel="stylesheet" href="/static/css/style.css?v=8">
 </head>
 <body data-auth-required>
 
@@ -14,8 +14,7 @@
     <div class="logo">
       <img src="/static/images/hyundai.png" alt="현대엔지니어링" height="30">
       <div>
-        <strong>Smart 3D Interior Planner</strong>
-        <span>3D 배치, 충돌 검토, 견적 자동화</span>
+        <strong>3D 인테리어 플래너</strong>
       </div>
     </div>
 
@@ -26,15 +25,18 @@
       <span class="nav-user" data-auth-user hidden></span>
       <button class="secondary-btn" type="button" data-auth-logout hidden>Logout</button>
 
-      <label for="floorPlanInput" class="upload-btn">평면도 업로드</label>
+      <label id="floor-plan-upload" for="floorPlanInput" class="upload-btn">평면도 업로드</label>
       <input type="file" id="floorPlanInput" accept=".json" hidden>
 
       <button id="btn-save" class="ghost-btn" type="button">저장</button>
       <button id="btn-load" class="ghost-btn" type="button">불러오기</button>
-      <button id="btn-pdf" class="ghost-btn" type="button">PDF 견적서</button>
-      <button id="btn-render-2d" class="ghost-btn" type="button">2D 렌더링</button>
-      <button id="btn-toggle-room-labels" class="ghost-btn active" type="button" aria-pressed="true">공간명 ON</button>
-      <button id="btn-accept" class="primary-btn" type="button">3D 렌더링</button>
+      <input type="file" id="layoutFileInput" accept=".json,.duo.json,application/json" hidden>
+      <button id="btn-pdf" class="ghost-btn" type="button">견적서</button>
+      <button id="btn-toggle-room-labels" class="ghost-btn active" type="button" aria-pressed="true">공간명</button>
+      <div class="view-switch" aria-label="보기 방식">
+        <button id="btn-render-2d" class="view-btn" type="button">2D</button>
+        <button id="btn-accept" class="view-btn" type="button">3D</button>
+      </div>
     </div>
   </header>
 
@@ -43,7 +45,6 @@
       <section class="panel-section">
         <div class="section-header">
           <h2>추천 패턴</h2>
-          <span id="active-theme">A</span>
         </div>
         <div id="trend-patterns" class="pattern-grid"></div>
       </section>
@@ -51,7 +52,6 @@
       <section class="panel-section estimate-panel">
         <div class="section-header">
           <h2>기본 견적</h2>
-          <span id="placed-count">0개</span>
         </div>
         <div class="estimate-total">
           <span>합계</span>
@@ -63,7 +63,6 @@
       <section class="panel-section">
         <div class="section-header">
           <h2>카탈로그</h2>
-          <span id="catalog-count">0 items</span>
         </div>
         <div id="catalog-tabs" class="catalog-tabs" aria-label="Catalog type"></div>
         <div id="furniture-category-filter" class="category-filter" aria-label="Furniture category"></div>
@@ -72,7 +71,6 @@
       <section id="floor-material-section" class="panel-section">
         <div class="section-header">
           <h2>바닥 마감재</h2>
-          <span id="floor-material-name">세로형 마루 07</span>
         </div>
         <div id="floor-materials" class="material-grid" aria-label="Floor materials"></div>
       </section>
@@ -80,7 +78,6 @@
       <section id="wall-material-section" class="panel-section">
         <div class="section-header">
           <h2>벽지</h2>
-          <span id="wall-material-name">화이트 실크</span>
         </div>
         <button id="btn-wall-add" class="ghost-btn panel-action" type="button">벽 추가</button>
         <div id="wall-materials" class="material-grid" aria-label="Wall materials"></div>
@@ -90,27 +87,64 @@
     </aside>
 
     <section id="canvas-container">
-      <div id="scene-status">
-        <strong>Planning Mode</strong>
-        <span>가구를 배치하면 충돌과 벽 간섭을 실시간으로 확인합니다.</span>
+      <div id="floorplan-loading" aria-hidden="true">
+        <div class="floorplan-loader" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <strong>평면도를 분석하고 있어요</strong>
+        <span>벽과 공간을 분리하는 중입니다. 잠시만 기다려주세요.</span>
+      </div>
+
+      <div id="canvas-empty-state">
+        <strong>평면도를 불러와 시작하세요</strong>
+        <span>JSON 평면도를 올리면 편집 가능한 2D 공간으로 자동 변환합니다.</span>
+        <label for="floorPlanInput" class="primary-btn">파일 선택</label>
+      </div>
+
+      <div id="scene-status" role="status" aria-live="polite">
+        <strong>2D 편집</strong>
+        <span>가구와 마감재를 배치할 수 있습니다.</span>
       </div>
 
       <div id="warning-panel" aria-live="polite"></div>
 
       <div id="furniture-toolbar">
         <input id="material-label-input" type="text" aria-label="자재명 수정">
+        <label id="rotation-control" class="rotation-control" for="furniture-rotation-input">
+          <span>회전 <b id="rotation-value">0°</b></span>
+          <input id="furniture-rotation-input" type="range" min="0" max="359" step="1" value="0" aria-label="가구 자유 회전 각도">
+        </label>
         <button id="btn-rotate" type="button">90도 회전</button>
         <button id="btn-delete" type="button">삭제</button>
       </div>
     </section>
   </main>
 
+  <dialog id="save-layout-dialog" class="app-dialog">
+    <form id="save-layout-form" method="dialog">
+      <div class="dialog-heading">
+        <strong>현재 배치 저장</strong>
+        <span>평면도와 가구 배치를 하나의 파일로 저장합니다.</span>
+      </div>
+      <label class="dialog-field" for="layout-name-input">
+        <span>파일 이름</span>
+        <input id="layout-name-input" type="text" maxlength="80" autocomplete="off" placeholder="예: 74D 거실 배치안">
+      </label>
+      <div class="dialog-actions">
+        <button id="btn-save-cancel" class="ghost-btn" type="button">취소</button>
+        <button class="primary-btn" type="submit">파일로 저장</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
   <script src="/static/js/auth-nav.js?v=3"></script>
-  <script src="/static/js/main.js?v=45"></script>
+  <script src="/static/js/api-client.js?v=1"></script>
+  <script src="/static/js/runtime-performance.js?v=2"></script>
+  <script src="/static/js/main.js?v=57"></script>
 
 </body>
 </html>

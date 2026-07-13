@@ -51,7 +51,7 @@ label {
   display: flex;
   height: 68px;
   justify-content: space-between;
-  padding: 0 24px;
+  padding: 0 20px;
   z-index: 10;
 }
 
@@ -60,6 +60,10 @@ label {
   align-items: center;
   display: flex;
   gap: 12px;
+}
+
+.nav-actions {
+  gap: 8px;
 }
 
 .logo div {
@@ -136,6 +140,53 @@ label {
   box-shadow: 0 0 0 3px rgba(0, 75, 135, 0.18);
 }
 
+.view-switch {
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, 42px);
+  padding: 3px;
+}
+
+.view-btn {
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: var(--gray-500);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  min-height: 30px;
+}
+
+.view-btn.active {
+  background: var(--white);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+  color: var(--blue-900);
+}
+
+#floor-plan-upload.is-loading {
+  color: transparent;
+  cursor: wait;
+  min-width: 112px;
+  pointer-events: none;
+  position: relative;
+}
+
+#floor-plan-upload.is-loading::after {
+  animation: spin 0.8s linear infinite;
+  border: 2px solid var(--gray-300);
+  border-radius: 50%;
+  border-top-color: var(--blue-800);
+  content: "";
+  height: 16px;
+  left: calc(50% - 8px);
+  position: absolute;
+  top: calc(50% - 8px);
+  width: 16px;
+}
+
 .panel-action {
   margin-bottom: 10px;
   width: 100%;
@@ -179,7 +230,7 @@ label {
 main {
   display: grid;
   flex: 1;
-  grid-template-columns: 380px minmax(0, 1fr);
+  grid-template-columns: 340px minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -484,22 +535,129 @@ main {
   position: relative;
 }
 
+#floorplan-loading {
+  background: rgba(248, 250, 252, 0.94);
+  inset: 0;
+  place-content: center;
+  place-items: center;
+  position: absolute;
+  text-align: center;
+  z-index: 120;
+}
+
+#floorplan-loading,
+#canvas-container:not(.is-loading) #floorplan-loading {
+  display: none;
+}
+
+#canvas-container.is-loading #floorplan-loading {
+  display: grid;
+  gap: 10px;
+}
+
+#canvas-container.is-loading #canvas-empty-state {
+  display: none;
+}
+
+#floorplan-loading strong {
+  color: var(--blue-900);
+  font-size: 17px;
+  margin-top: 6px;
+}
+
+#floorplan-loading > span {
+  color: var(--gray-500);
+  font-size: 13px;
+}
+
+.floorplan-loader {
+  height: 74px;
+  position: relative;
+  width: 74px;
+}
+
+.floorplan-loader span {
+  animation: floorplan-pulse 1.5s ease-in-out infinite;
+  border: 3px solid var(--blue-800);
+  border-radius: 12px;
+  inset: 0;
+  position: absolute;
+}
+
+.floorplan-loader span:nth-child(2) {
+  animation-delay: 0.18s;
+  border-color: var(--teal-700);
+  inset: 11px;
+}
+
+.floorplan-loader span:nth-child(3) {
+  animation-delay: 0.36s;
+  border-color: var(--blue-700);
+  inset: 22px;
+}
+
+#canvas-empty-state {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--gray-200);
+  border-radius: 12px;
+  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.12);
+  display: grid;
+  gap: 8px;
+  left: 50%;
+  max-width: 390px;
+  padding: 26px;
+  place-items: center;
+  position: absolute;
+  text-align: center;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: calc(100% - 40px);
+  z-index: 6;
+}
+
+#canvas-empty-state strong {
+  color: var(--blue-900);
+  font-size: 18px;
+}
+
+#canvas-empty-state span {
+  color: var(--gray-500);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+#canvas-empty-state .primary-btn {
+  margin-top: 6px;
+}
+
+#canvas-container.has-plan #canvas-empty-state {
+  display: none;
+}
+
+#canvas-container:not(.has-plan):not(.is-loading) #scene-status {
+  display: none;
+}
+
 #scene-status,
 #warning-panel {
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid rgba(209, 213, 219, 0.9);
   border-radius: 8px;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
   display: grid;
   gap: 3px;
   left: 18px;
-  padding: 12px 14px;
+  padding: 9px 12px;
   position: absolute;
   z-index: 5;
 }
 
 #scene-status {
   top: 18px;
+}
+
+#canvas-container.is-loading #scene-status {
+  cursor: wait;
 }
 
 #warning-panel {
@@ -534,8 +692,11 @@ main {
   bottom: 28px;
   box-shadow: 0 14px 32px rgba(15, 23, 42, 0.14);
   display: none;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: center;
   left: 50%;
+  max-width: calc(100% - 32px);
   padding: 8px;
   position: absolute;
   transform: translateX(-50%);
@@ -550,6 +711,36 @@ main {
   min-height: 34px;
   min-width: 210px;
   padding: 7px 10px;
+}
+
+.rotation-control {
+  align-items: center;
+  color: var(--gray-700);
+  display: grid;
+  font-size: 11px;
+  font-weight: 750;
+  gap: 2px;
+  min-width: 150px;
+}
+
+.rotation-control span {
+  display: flex;
+  justify-content: space-between;
+}
+
+.rotation-control b {
+  color: var(--blue-800);
+}
+
+#furniture-rotation-input {
+  accent-color: var(--blue-800);
+  cursor: grab;
+  margin: 0;
+  width: 150px;
+}
+
+#furniture-rotation-input:active {
+  cursor: grabbing;
 }
 
 #furniture-toolbar button {
@@ -567,6 +758,78 @@ main {
 #furniture-toolbar button:hover {
   border-color: var(--blue-800);
   color: var(--blue-900);
+}
+
+.app-dialog {
+  background: transparent;
+  border: 0;
+  margin: auto;
+  max-width: 440px;
+  padding: 0;
+  width: calc(100% - 32px);
+}
+
+.app-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.46);
+  backdrop-filter: blur(2px);
+}
+
+.app-dialog form {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+  display: grid;
+  gap: 20px;
+  padding: 24px;
+}
+
+.dialog-heading {
+  display: grid;
+  gap: 5px;
+}
+
+.dialog-heading strong {
+  color: var(--blue-900);
+  font-size: 18px;
+}
+
+.dialog-heading span,
+.dialog-field span {
+  color: var(--gray-500);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dialog-field {
+  display: grid;
+  gap: 7px;
+}
+
+.dialog-field span {
+  color: var(--gray-700);
+  font-weight: 750;
+}
+
+.dialog-field input {
+  border: 1px solid var(--gray-300);
+  border-radius: 7px;
+  font: inherit;
+  min-height: 42px;
+  outline: none;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.dialog-field input:focus {
+  border-color: var(--blue-800);
+  box-shadow: 0 0 0 3px rgba(33, 89, 183, 0.12);
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 #btn-delete:hover {
@@ -595,6 +858,28 @@ main {
   #canvas-container {
     order: 2;
   }
+}
+
+@media (max-width: 1180px) {
+  .logo div,
+  .nav-user,
+  #btn-pdf,
+  #btn-toggle-room-labels {
+    display: none !important;
+  }
+
+  #top-nav {
+    padding-inline: 12px;
+  }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes floorplan-pulse {
+  0%, 100% { opacity: 0.25; transform: rotate(0deg) scale(0.92); }
+  50% { opacity: 1; transform: rotate(45deg) scale(1); }
 }
 
 .auth-page {

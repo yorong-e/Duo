@@ -1,5 +1,7 @@
 package com.duo.app.service;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -69,6 +71,10 @@ public class FloorplanService {
             Path input = tempDir.resolve(safeName(file.getOriginalFilename(), "floorplan.json"));
             Path output = tempDir.resolve("editable-floorplan.json");
             file.transferTo(input);
+            if (isSavedLayoutFile(input)) {
+                throw new IllegalArgumentException(
+                        "저장된 배치 파일입니다. 평면도 업로드 대신 불러오기를 사용해주세요.");
+            }
 
             String cacheKey = sha256(input);
             JsonNode cached = getCached(cacheKey);
@@ -102,6 +108,17 @@ public class FloorplanService {
             }
         } finally {
             FileSystemUtils.deleteRecursively(tempDir);
+        }
+    }
+
+    /** 저장 파일을 무거운 Python 벡터화 프로세스에 넘기기 전에 식별한다. */
+    private boolean isSavedLayoutFile(Path input) throws IOException {
+        try (JsonParser parser = objectMapper.getFactory().createParser(input.toFile())) {
+            if (parser.nextToken() != JsonToken.START_OBJECT) return false;
+            if (parser.nextToken() != JsonToken.FIELD_NAME) return false;
+            if (!"schema".equals(parser.currentName())) return false;
+            return parser.nextToken() == JsonToken.VALUE_STRING
+                    && "duo-layout".equals(parser.getValueAsString());
         }
     }
 

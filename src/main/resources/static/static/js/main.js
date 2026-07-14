@@ -11,9 +11,14 @@
   const FLOOR_PLAN_PIXEL_TO_SCENE = FLOOR_PLAN_PIXEL_MM * MM_TO_SCENE;
   const FALLBACK_FLOOR_PLAN_SIZE_M = 12;
   const SNAP_DISTANCE = 0.35;
-  const WALL_MAGNET_DISTANCE = 1.2;
-  const WALL_MAGNET_OVERLAP_MARGIN = 0.35;
+  const WALL_MAGNET_DISTANCE = 1.1;
+  const WALL_MAGNET_OVERLAP_MARGIN = 0.4;
+  const WALL_CORNER_MAX_NORMAL_DOT = 0.3;
   const WALL_BUFFER = 0.04;
+  // 자동 추천 배치는 벽과 시각적인 틈이 없도록 6mm만 남긴다.
+  // 수동 드래그는 조작 안정성을 위해 기존 40mm 버퍼를 유지한다.
+  const AUTO_WALL_CONTACT_GAP = 0.006;
+  const AUTO_CARDINAL_STEP = Math.PI / 2;
   const DEFAULT_WALL_COLOR = 0x111827;
   const DEFAULT_WALL_OVERLAY_COLOR = "#111827";
   const PARTITION_WALL_MAX_THICKNESS_M = 0.2;
@@ -35,6 +40,8 @@
   // 면적 계산에 충분한 정밀도를 유지한다.
   const FLOOR_MASK_TARGET_WIDTH = 640;
   const RENDERED_WALL_HEIGHT_RATIO = 0.6;
+  // 비실사용 회색 영역은 3D에서 벽 높이의 절반만큼 솟은 단차로 표시한다.
+  const NON_RESIDENTIAL_HEIGHT_RATIO = 0.5;
   const ROOM_LABEL_SCENE_HEIGHT = 0.64;
 
   const DETECTION_LABEL_MAP = {
@@ -87,44 +94,88 @@
       code: "A",
       name: "미니멀",
       color: "white",
+      colors: ["white", "gray"],
+      floorMaterials: ["lightwood", "cream", "마루 16", "라이트"],
+      floorFallbackIndex: 2,
+      wallMaterials: ["white", "화이트", "실크"],
+      wallFallbackIndex: 0,
+      productKeywords: {
+        "소파": ["LILLESÄTER", "EKHOLMA", "GLOSTAD"],
+        "식탁": ["HAUGA", "DALSHULT"],
+        "의자": ["ÅLHULT", "BERGMUND", "MÖRTFORS"],
+        "침대": ["VEVELSTAD", "BRIMNES", "RAMSTA"],
+      },
       placements: [
         { category: "소파", targetRoom: "living_room", rot: 0 },
         { category: "식탁", targetRoom: "living_room", rot: 0 },
-        { category: "의자", targetRoom: "living_room", rot: 0 },
-        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: Math.PI / 2 },
+        { category: "의자", targetRoom: "living_room", attachToCategory: "식탁", rot: 0 },
+        { category: "침대", targetRoom: "bedroom", rot: Math.PI / 2 },
       ],
     },
     {
       code: "B",
       name: "웜우드",
       color: "brown",
+      colors: ["brown", "white"],
+      floorMaterials: ["oak", "herringbone", "오크", "헤링본", "마루 07"],
+      floorFallbackIndex: 0,
+      wallMaterials: ["warm", "웜", "그레이지", "베이지"],
+      wallFallbackIndex: 1,
+      productKeywords: {
+        "소파": ["STOCKHOLM", "LANDSKRONA", "SÖDERHAMN"],
+        "식탁": ["SKANSNÄS", "DALSHULT"],
+        "의자": ["NÄSINGE", "ÅLHULT", "KRYLBO"],
+        "침대": ["RAMNEFJÄLL", "MALM", "UTÅKER"],
+      },
       placements: [
         { category: "소파", targetRoom: "living_room", rot: Math.PI / 2 },
         { category: "식탁", targetRoom: "living_room", rot: 0 },
-        { category: "의자", targetRoom: "living_room", rot: Math.PI },
-        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: 0 },
+        { category: "의자", targetRoom: "living_room", attachToCategory: "식탁", rot: Math.PI },
+        { category: "침대", targetRoom: "bedroom", rot: 0 },
       ],
     },
     {
       code: "C",
       name: "모던블랙",
       color: "black",
+      colors: ["black", "gray"],
+      floorMaterials: ["graytile", "그레이", "회색", "마루 08"],
+      floorFallbackIndex: 3,
+      wallMaterials: ["gray", "charcoal", "그레이", "차콜"],
+      wallFallbackIndex: 2,
+      productKeywords: {
+        "소파": ["KIVIK", "KLIPPAN", "JÄTTEBO", "GLOSTAD"],
+        "식탁": ["SANDSBERG", "LISABO"],
+        "의자": ["BERGMUND", "MÖRTFORS"],
+        "침대": ["SLATTUM", "BRIMNES"],
+      },
       placements: [
         { category: "소파", targetRoom: "living_room", rot: 0 },
         { category: "식탁", targetRoom: "living_room", rot: 0 },
-        { category: "의자", targetRoom: "living_room", rot: Math.PI / 2 },
-        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: Math.PI },
+        { category: "의자", targetRoom: "living_room", attachToCategory: "식탁", rot: Math.PI / 2 },
+        { category: "침대", targetRoom: "bedroom", rot: Math.PI },
       ],
     },
     {
       code: "D",
       name: "트렌드블루",
       color: "blue",
+      colors: ["blue", "gray"],
+      floorMaterials: ["lightwood", "cream", "마루 16", "라이트"],
+      floorFallbackIndex: 2,
+      wallMaterials: ["blue", "블루", "포그", "청색"],
+      wallFallbackIndex: 4,
+      productKeywords: {
+        "소파": ["JÄTTEBO", "GLOSTAD", "LILLESÄTER"],
+        "식탁": ["HAUGA", "LISABO"],
+        "의자": ["MÖRTFORS", "BERGMUND"],
+        "침대": ["SLATTUM", "SAGESUND", "VEVELSTAD"],
+      },
       placements: [
         { category: "소파", targetRoom: "living_room", rot: Math.PI / 2 },
         { category: "식탁", targetRoom: "living_room", rot: 0 },
-        { category: "의자", targetRoom: "living_room", rot: Math.PI / 2 },
-        { category: "침대", targetRoom: "bedroom", eachRoom: true, rot: 0 },
+        { category: "의자", targetRoom: "living_room", attachToCategory: "식탁", rot: Math.PI / 2 },
+        { category: "침대", targetRoom: "bedroom", rot: 0 },
       ],
     },
   ];
@@ -797,6 +848,12 @@
 
     setFloorPlanLoading(true);
     try {
+      const layoutPayload = await readDuoLayoutPayload(file);
+      if (layoutPayload) {
+        await restoreLayout(layoutPayload);
+        updateSceneStatus("불러오기 완료", `${layoutPayload.name || file.name} 배치를 복원했습니다.`);
+        return;
+      }
       const planData = await vectorizeFloorPlanFile(file);
       loadFloorPlan(planData);
       getCanvasContainer().classList.add("has-plan");
@@ -807,6 +864,16 @@
     } finally {
       setFloorPlanLoading(false);
     }
+  }
+
+  async function readDuoLayoutPayload(file) {
+    // 저장 파일은 schema를 첫 필드로 기록한다. 앞부분만 먼저 확인해 일반
+    // 평면도의 대형 base64 이미지를 브라우저에서 불필요하게 JSON.parse하지 않는다.
+    const prefix = await file.slice(0, Math.min(file.size, 4096)).text();
+    if (!/"schema"\s*:\s*"duo-layout"/.test(prefix)) return null;
+    const payload = JSON.parse(await file.text());
+    if (!payload || payload.schema !== "duo-layout") return null;
+    return payload;
   }
 
   function setFloorPlanLoading(isLoading) {
@@ -2388,6 +2455,9 @@
       mesh.userData.placementAllowed = false;
       group.add(mesh);
       state.nonResidentialOverlay = mesh;
+      if (state.renderMode === "3d" && state.visualizationGroup) {
+        addRenderedNonResidentialAreas(state.visualizationGroup);
+      }
       updateSafetyState();
     };
     img.onerror = () => {
@@ -2425,6 +2495,7 @@
         }
       }
       if (changed) changedRooms.push(room);
+      if (changed) delete room.userData.maskAreaPixels;
     });
     if (changedRooms.length === 0) return;
 
@@ -3469,7 +3540,11 @@
     const pivot = options.fastPlan
       ? create2DFurniturePivot(item)
       : await createGLBFurniturePivot(item) || create2DFurniturePivot(item);
-    addPlacedFurniturePivot(pivot, options);
+    const placed = addPlacedFurniturePivot(pivot, options);
+    if (!placed) {
+      disposeObject3D(pivot);
+      return null;
+    }
     if (options.fastPlan) {
       // 가벼운 박스로 먼저 즉시 배치한 뒤 실제 GLB를 병렬로 읽어 같은
       // 위치에서 교체한다. 추천 클릭은 빠르고 결과는 박스로 남지 않는다.
@@ -3485,6 +3560,7 @@
       }
       invalidateRender();
     }
+    return pivot;
   }
 
   async function upgradePlanningFurnitureModel(placeholder, item) {
@@ -3526,26 +3602,56 @@
 
   function addPlacedFurniturePivot(pivot, options) {
     const hasRequestedPosition = Number.isFinite(options.x) && Number.isFinite(options.z);
+    const semanticTarget = options.autoPlace === true
+      ? (getSemanticFurnitureTarget(pivot.userData.category, options.targetRoom)
+          || getLargestFurnitureRoomTarget())
+      : null;
     const defaultAnchor = getDefaultFurnitureAnchor(
       pivot.userData.category,
       options.targetRoom,
-      options.roomIndex
+      semanticTarget
     );
+    if (semanticTarget && semanticTarget.room) {
+      // 자동 추천 후보 탐색 중에는 가장 큰 의미 공간 밖의 후보를 거부한다.
+      // 배치가 끝나면 제한을 제거해 사용자가 자유롭게 다시 옮길 수 있다.
+      pivot.userData.autoPlacementRoomId = semanticTarget.room.userData.id;
+    }
+    if (options.autoPlace === true) {
+      pivot.userData.autoPlacementClearance = getAutoPlacementClearance(pivot);
+    }
     pivot.position.set(
       hasRequestedPosition ? options.x : defaultAnchor.x,
       pivot.userData.centerY || 0,
       hasRequestedPosition ? options.z : defaultAnchor.z
     );
-    pivot.rotation.y = Number(options.rot) || 0;
+    const cardinalRotation = options.cardinalRotation === true;
+    const requestedRotation = Number(options.rot) || 0;
+    pivot.rotation.y = cardinalRotation
+      ? snapToCardinalRotation(requestedRotation)
+      : requestedRotation;
 
     const constrained = applyWallMagnetAndBounds(pivot, pivot.position);
     pivot.position.copy(constrained.position);
     const shouldAutoPlace = options.autoPlace === true || !hasRequestedPosition;
+    const shouldAttachToWall = options.wallPreferred === true
+      || (options.wallPreferred !== false && shouldPreferWallPlacement(pivot.userData.category));
     if (shouldAutoPlace) {
-      const wallPlacement = options.wallPreferred
-        ? findAvailableWallFurniturePlacement(pivot, pivot.position)
+      const companionCategory = options.attachToCategory
+        || (String(pivot.userData.category || "").includes("의자") ? "식탁" : "");
+      const companionPlacement = companionCategory
+        ? findCompanionFurniturePlacement(pivot, companionCategory, cardinalRotation)
         : null;
-      if (wallPlacement) {
+      const wallPlacement = !companionPlacement && shouldAttachToWall
+        ? findAvailableWallFurniturePlacement(
+            pivot,
+            pivot.position,
+            cardinalRotation ? pivot.rotation.y : null
+          )
+        : null;
+      if (companionPlacement) {
+        pivot.position.copy(companionPlacement.position);
+        pivot.rotation.y = companionPlacement.rotationY;
+      } else if (wallPlacement) {
         pivot.position.copy(wallPlacement.position);
         pivot.rotation.y = wallPlacement.rotationY;
       } else if (!isFurniturePlacementAvailable(pivot, pivot.position)) {
@@ -3553,23 +3659,107 @@
         if (available) pivot.position.copy(available);
       }
     }
+    if (cardinalRotation) {
+      pivot.rotation.y = snapToCardinalRotation(pivot.rotation.y);
+    }
+
+    const placementAvailable = isFurniturePlacementAvailable(pivot, pivot.position);
+    if (options.autoPlace === true && !placementAvailable) {
+      delete pivot.userData.autoPlacementRoomId;
+      delete pivot.userData.autoPlacementClearance;
+      return false;
+    }
 
     state.scene.add(pivot);
     state.furnitureMeshes.push(pivot);
-    if (isFurniturePlacementAvailable(pivot, pivot.position)) {
+    if (placementAvailable) {
       pivot.userData.lastSafePosition = pivot.position.clone();
     }
+    delete pivot.userData.autoPlacementRoomId;
+    delete pivot.userData.autoPlacementClearance;
 
     if (!state.suppressAutoSelect && options.select !== false) {
       selectFurniture(pivot, document.getElementById("furniture-toolbar"));
     }
     updateSafetyState();
     updateEstimate();
+    return true;
   }
 
-  function getDefaultFurnitureAnchor(category, targetRoom, roomIndex) {
-    const semanticAnchor = getSemanticFurnitureAnchor(category, targetRoom, roomIndex);
-    if (semanticAnchor) return semanticAnchor;
+  function snapToCardinalRotation(rotationY) {
+    const snapped = Math.round((Number(rotationY) || 0) / AUTO_CARDINAL_STEP) * AUTO_CARDINAL_STEP;
+    const fullTurn = Math.PI * 2;
+    return ((snapped % fullTurn) + fullTurn) % fullTurn;
+  }
+
+  function getAutoPlacementClearance(model) {
+    const category = String(model.userData && model.userData.category || "");
+    if (category.includes("소파")) return 0.65;
+    if (category.includes("침대")) return 0.55;
+    if (category.includes("식탁") || category.includes("테이블")) return 0.55;
+    // 식탁과 의자는 한 세트로 보이되 서로 맞닿아 보이지 않을 정도만 띄운다.
+    if (category.includes("의자")) return 0.18;
+
+    const dimensions = getFootprintDimensions(model);
+    if (!dimensions) return 0.25;
+    const area = dimensions.width * dimensions.depth;
+    const longSide = Math.max(dimensions.width, dimensions.depth);
+    if (area >= 2 || longSide >= 2) return 0.55;
+    if (area >= 1 || longSide >= 1.4) return 0.4;
+    return 0.25;
+  }
+
+  function findCompanionFurniturePlacement(model, companionCategory, cardinalRotation) {
+    const companion = state.furnitureMeshes.slice().reverse().find((item) => {
+      const category = String(item.userData && item.userData.category || "");
+      const name = String(item.userData && item.userData.productName || "");
+      return category.includes(companionCategory) || name.includes(companionCategory);
+    });
+    if (!companion) return null;
+
+    const originalPosition = model.position.clone();
+    const originalRotation = model.rotation.y;
+    const companionRotation = companion.rotation.y || 0;
+    const axis = { x: Math.cos(companionRotation), z: -Math.sin(companionRotation) };
+    const normal = { x: Math.sin(companionRotation), z: Math.cos(companionRotation) };
+    const companionBox = getPlanBox(companion);
+    const companionAlong = getModelHalfExtentAlong(companion, axis, companionBox);
+    const companionNormal = getModelHalfExtentAlong(companion, normal, companionBox);
+    const attempts = [
+      { direction: normal, companionExtent: companionNormal, rotationY: companionRotation + Math.PI },
+      { direction: { x: -normal.x, z: -normal.z }, companionExtent: companionNormal, rotationY: companionRotation },
+      { direction: axis, companionExtent: companionAlong, rotationY: companionRotation - Math.PI / 2 },
+      { direction: { x: -axis.x, z: -axis.z }, companionExtent: companionAlong, rotationY: companionRotation + Math.PI / 2 },
+    ];
+
+    for (const extraGap of [0.08, 0.2, 0.35]) {
+      for (const attempt of attempts) {
+        const rotationY = cardinalRotation
+          ? snapToCardinalRotation(attempt.rotationY)
+          : attempt.rotationY;
+        model.rotation.y = rotationY;
+        model.position.copy(companion.position);
+        const modelExtent = getModelHalfExtentAlong(model, attempt.direction, getPlanBox(model));
+        const distance = attempt.companionExtent + modelExtent + extraGap;
+        const candidate = new THREE.Vector3(
+          companion.position.x + attempt.direction.x * distance,
+          model.userData.centerY || 0,
+          companion.position.z + attempt.direction.z * distance
+        );
+        if (!isFurniturePlacementAvailable(model, candidate)) continue;
+        model.position.copy(originalPosition);
+        model.rotation.y = originalRotation;
+        return { position: candidate, rotationY };
+      }
+    }
+    model.position.copy(originalPosition);
+    model.rotation.y = originalRotation;
+    return null;
+  }
+
+  function getDefaultFurnitureAnchor(category, targetRoom, semanticTarget) {
+    const target = semanticTarget || getSemanticFurnitureTarget(category, targetRoom);
+    if (target && target.anchor) return target.anchor;
     const selected = state.roomObjects.find((room) => room.userData.id === state.selectedRoomId);
     if (selected && selected.userData.center) return selected.userData.center;
     const largestRoom = state.roomObjects.reduce((largest, room) => {
@@ -3583,7 +3773,7 @@
     return state.floorBounds ? state.floorBounds.center : { x: 0, z: 0 };
   }
 
-  function getSemanticFurnitureAnchor(category, targetRoom, roomIndex) {
+  function getSemanticFurnitureTarget(category, targetRoom) {
     const preferredTypes = [];
     if (targetRoom) preferredTypes.push(targetRoom);
     getPreferredRoomTypesForCategory(category).forEach((roomType) => {
@@ -3593,11 +3783,67 @@
       const labels = state.roomLabelObjects.filter(
         (label) => label.userData && label.userData.roomType === roomType
       );
-      if (labels.length === 0) continue;
-      const index = Math.abs(Number(roomIndex) || 0) % labels.length;
-      return { x: labels[index].position.x, z: labels[index].position.z };
+      const candidatesByRoom = new Map();
+      labels.forEach((label) => {
+        const room = findRoomContainingPoint(label.position.x, label.position.z);
+        if (!room) return;
+        const area = getRoomMaskPixelArea(room);
+        const previous = candidatesByRoom.get(room.userData.id);
+        if (!previous || area > previous.area) {
+          candidatesByRoom.set(room.userData.id, {
+            room,
+            area,
+            anchor: { x: label.position.x, z: label.position.z },
+          });
+        }
+      });
+      state.roomObjects.forEach((room) => {
+        if (!room.userData || room.userData.roomType !== roomType) return;
+        if (candidatesByRoom.has(room.userData.id)) return;
+        candidatesByRoom.set(room.userData.id, {
+          room,
+          area: getRoomMaskPixelArea(room),
+          anchor: room.userData.center,
+        });
+      });
+      const largest = Array.from(candidatesByRoom.values())
+        .filter((candidate) => candidate.anchor && candidate.area > 0)
+        .sort((a, b) => b.area - a.area)[0];
+      if (largest) return largest;
     }
     return null;
+  }
+
+  function findRoomContainingPoint(x, z) {
+    if (!state.floorBounds) return null;
+    return state.roomObjects.find((room) => {
+      const width = room.userData.maskWidth;
+      const height = room.userData.maskHeight;
+      const mask = room.userData.mask;
+      if (!mask || !width || !height) return false;
+      const pixel = scenePointToRoomPixel(x, z, width, height, state.floorBounds);
+      return Boolean(mask[pixel.y * width + pixel.x]);
+    }) || null;
+  }
+
+  function getRoomMaskPixelArea(room) {
+    if (!room || !room.userData || !room.userData.mask) return 0;
+    if (Number.isFinite(room.userData.maskAreaPixels)) return room.userData.maskAreaPixels;
+    const area = room.userData.mask.reduce((sum, value) => sum + (value ? 1 : 0), 0);
+    room.userData.maskAreaPixels = area;
+    return area;
+  }
+
+  function getLargestFurnitureRoomTarget() {
+    const largest = state.roomObjects
+      .map((room) => ({ room, area: getRoomMaskPixelArea(room) }))
+      .filter((candidate) => candidate.area > 0 && candidate.room.userData.center)
+      .sort((a, b) => b.area - a.area)[0];
+    if (!largest) return null;
+    return {
+      ...largest,
+      anchor: largest.room.userData.center,
+    };
   }
 
   function getPreferredRoomTypesForCategory(category) {
@@ -3616,14 +3862,48 @@
   }
 
   function isFurniturePlacementAvailable(model, position) {
+    const allowedRoomId = model.userData && model.userData.autoPlacementRoomId;
+    if (allowedRoomId) {
+      const allowedRoom = state.roomObjects.find((room) => room.userData.id === allowedRoomId);
+      if (!allowedRoom || !isFurniturePlacementInsideRoom(model, position, allowedRoom)) return false;
+    }
     if (getBlockedPlacementAt(model, position)) return false;
     const original = model.position.clone();
     model.position.copy(position);
     const footprint = getPlanFootprint(model);
+    const clearance = Math.max(
+      0,
+      Number(model.userData && model.userData.autoPlacementClearance) || 0
+    );
+    const clearanceFootprint = clearance > 0
+      ? getPlanFootprint(model, clearance)
+      : footprint;
     model.position.copy(original);
     return !state.furnitureMeshes.some(
-      (other) => other !== model && footprintsIntersect(footprint, getPlanFootprint(other))
+      (other) => other !== model
+        && footprintsIntersect(clearanceFootprint, getPlanFootprint(other))
     );
+  }
+
+  function isFurniturePlacementInsideRoom(model, position, room) {
+    if (!state.floorBounds || !room || !room.userData.mask) return false;
+    const originalPosition = model.position.clone();
+    model.position.copy(position);
+    let inside = 0;
+    let total = 0;
+    forEachModelFootprintSample(model, 5, 0.1, (point) => {
+      const pixel = scenePointToRoomPixel(
+        point.x,
+        point.z,
+        room.userData.maskWidth,
+        room.userData.maskHeight,
+        state.floorBounds
+      );
+      total += 1;
+      if (room.userData.mask[pixel.y * room.userData.maskWidth + pixel.x]) inside += 1;
+    });
+    model.position.copy(originalPosition);
+    return inside / Math.max(total, 1) >= 0.88;
   }
 
   function findAvailableFurniturePosition(model, preferredPosition) {
@@ -3669,9 +3949,11 @@
     return null;
   }
 
-  function findAvailableWallFurniturePlacement(model, preferredPosition) {
+  function findAvailableWallFurniturePlacement(model, preferredPosition, lockedRotationY) {
     if (!state.floorBounds) return null;
-    const directImagePlacement = findImageWallPlacementNearPoint(model, preferredPosition);
+    const directVectorPlacement = findVectorWallPlacementNearPoint(model, preferredPosition, lockedRotationY);
+    if (directVectorPlacement) return directVectorPlacement;
+    const directImagePlacement = findImageWallPlacementNearPoint(model, preferredPosition, lockedRotationY);
     if (directImagePlacement) return directImagePlacement;
     const originalPosition = model.position.clone();
     const originalRotation = model.rotation.y;
@@ -3694,15 +3976,15 @@
           );
           model.position.copy(candidate);
           model.rotation.y = originalRotation;
-          let snap = findBestWallSnap(getPlanBox(model));
+          let snap = findBestWallSnap(getPlanBox(model), AUTO_WALL_CONTACT_GAP, model);
           if (!snap) continue;
 
-          const rotationY = Number.isFinite(snap.rotationY)
-            ? snap.rotationY
-            : originalRotation;
+          const rotationY = Number.isFinite(lockedRotationY)
+            ? snapToCardinalRotation(lockedRotationY)
+            : (Number.isFinite(snap.rotationY) ? snap.rotationY : originalRotation);
           model.rotation.y = rotationY;
           model.position.copy(candidate);
-          snap = findBestWallSnap(getPlanBox(model));
+          snap = findBestWallSnap(getPlanBox(model), AUTO_WALL_CONTACT_GAP, model);
           if (!snap) continue;
           const snappedPosition = candidate.clone();
           snappedPosition.x += snap.dx;
@@ -3720,7 +4002,93 @@
     return null;
   }
 
-  function findImageWallPlacementNearPoint(model, preferredPosition) {
+  function findVectorWallPlacementNearPoint(model, preferredPosition, lockedRotationY) {
+    if (state.wallObjects.length === 0) return null;
+    const originalPosition = model.position.clone();
+    const originalRotation = model.rotation.y;
+    const walls = state.wallObjects
+      .filter((wall) => wall.geometry && wall.geometry.parameters)
+      .map((wall) => ({ wall, distance: distanceFromPointToWall(preferredPosition, wall) }))
+      .sort((a, b) => a.distance - b.distance);
+
+    for (const entry of walls) {
+      const wall = entry.wall;
+      const params = wall.geometry.parameters;
+      const wallLength = Number(params.width) || 0;
+      const wallThickness = Number(params.depth) || 0;
+      if (wallLength <= 0.1 || wallThickness <= 0) continue;
+
+      const wallRotationY = wall.rotation.y || 0;
+      const rotationY = Number.isFinite(lockedRotationY)
+        ? snapToCardinalRotation(lockedRotationY)
+        : wallRotationY;
+      const wallAngle = -wallRotationY;
+      const axis = { x: Math.cos(wallAngle), z: Math.sin(wallAngle) };
+      const normal = { x: -axis.z, z: axis.x };
+      model.rotation.y = rotationY;
+      model.position.set(wall.position.x, model.userData.centerY || 0, wall.position.z);
+      const box = getPlanBox(model);
+      const halfAlong = getModelHalfExtentAlong(model, axis, box);
+      const halfNormal = getModelHalfExtentAlong(model, normal, box);
+      const usableHalfLength = wallLength / 2 - halfAlong - 0.015;
+      if (usableHalfLength <= 0) continue;
+
+      const relativeX = preferredPosition.x - wall.position.x;
+      const relativeZ = preferredPosition.z - wall.position.z;
+      const preferredAlong = clamp(
+        relativeX * axis.x + relativeZ * axis.z,
+        -usableHalfLength,
+        usableHalfLength
+      );
+      const normalDot = relativeX * normal.x + relativeZ * normal.z;
+      const preferredSide = normalDot >= 0 ? 1 : -1;
+      const sides = [preferredSide, -preferredSide];
+      const slideStep = clamp(halfAlong * 0.8, 0.35, 0.9);
+      const maxSlides = Math.max(2, Math.ceil(wallLength / Math.max(slideStep, 0.1)));
+
+      for (const side of sides) {
+        for (let index = 0; index <= maxSlides; index += 1) {
+          const slideDirection = index === 0
+            ? 0
+            : (index % 2 ? 1 : -1) * Math.ceil(index / 2);
+          const along = clamp(
+            preferredAlong + slideDirection * slideStep,
+            -usableHalfLength,
+            usableHalfLength
+          );
+          const distanceFromWall = wallThickness / 2 + halfNormal + AUTO_WALL_CONTACT_GAP;
+          const candidate = new THREE.Vector3(
+            wall.position.x + axis.x * along + normal.x * side * distanceFromWall,
+            model.userData.centerY || 0,
+            wall.position.z + axis.z * along + normal.z * side * distanceFromWall
+          );
+          if (!isFurniturePlacementAvailable(model, candidate)) continue;
+          model.position.copy(originalPosition);
+          model.rotation.y = originalRotation;
+          return { position: candidate, rotationY };
+        }
+      }
+    }
+    model.position.copy(originalPosition);
+    model.rotation.y = originalRotation;
+    return null;
+  }
+
+  function distanceFromPointToWall(point, wall) {
+    const params = wall.geometry && wall.geometry.parameters;
+    const length = params ? Number(params.width) || 0 : 0;
+    const angle = -(wall.rotation.y || 0);
+    const axisX = Math.cos(angle);
+    const axisZ = Math.sin(angle);
+    const relX = point.x - wall.position.x;
+    const relZ = point.z - wall.position.z;
+    const along = clamp(relX * axisX + relZ * axisZ, -length / 2, length / 2);
+    const closestX = wall.position.x + axisX * along;
+    const closestZ = wall.position.z + axisZ * along;
+    return Math.hypot(point.x - closestX, point.z - closestZ);
+  }
+
+  function findImageWallPlacementNearPoint(model, preferredPosition, lockedRotationY) {
     const mask = state.imageWallMask;
     const bounds = state.floorBounds;
     if (!mask || !bounds) return null;
@@ -3744,20 +4112,26 @@
         ];
     const originalPosition = model.position.clone();
     const originalRotation = model.rotation.y;
-    const rotationY = -Math.atan2(tangent.z, tangent.x);
+    const rotationY = Number.isFinite(lockedRotationY)
+      ? snapToCardinalRotation(lockedRotationY)
+      : -Math.atan2(tangent.z, tangent.x);
     model.rotation.y = rotationY;
 
     for (const normal of normals) {
-      model.position.set(wallPoint.x, model.userData.centerY || 0, wallPoint.z);
+      const boundaryPoint = findWallInteriorBoundaryPoint(mask, wallPixel, normal, bounds) || wallPoint;
+      model.position.set(boundaryPoint.x, model.userData.centerY || 0, boundaryPoint.z);
       const box = getPlanBox(model);
-      const halfTowardWall = (
-        Math.abs(normal.x) * (box.maxX - box.minX) / 2
-        + Math.abs(normal.z) * (box.maxZ - box.minZ) / 2
+      const halfTowardWall = getModelHalfExtentAlong(model, normal, box);
+      // 마스크 한 픽셀의 중심이 벽으로 판정되는 오차만큼만 띄운다.
+      // 화면에서는 벽에 붙어 보이면서 충돌 마스크 안으로는 들어가지 않는다.
+      const contactGap = Math.max(
+        AUTO_WALL_CONTACT_GAP,
+        Math.min(bounds.width / mask.width, bounds.depth / mask.height) * 0.75
       );
       const base = new THREE.Vector3(
-        wallPoint.x + normal.x * (halfTowardWall + WALL_BUFFER + 0.03),
+        boundaryPoint.x + normal.x * (halfTowardWall + contactGap),
         model.userData.centerY || 0,
-        wallPoint.z + normal.z * (halfTowardWall + WALL_BUFFER + 0.03)
+        boundaryPoint.z + normal.z * (halfTowardWall + contactGap)
       );
       const slideStep = clamp(Math.max(box.maxX - box.minX, box.maxZ - box.minZ) * 0.55, 0.45, 1.1);
       for (let index = 0; index <= 8; index += 1) {
@@ -3773,6 +4147,27 @@
     }
     model.position.copy(originalPosition);
     model.rotation.y = originalRotation;
+    return null;
+  }
+
+  function findWallInteriorBoundaryPoint(mask, wallPixel, normal, bounds) {
+    const pixelScaleX = bounds.width / Math.max(mask.width, 1);
+    const pixelScaleY = bounds.depth / Math.max(mask.height, 1);
+    const pixelDirectionX = normal.x / Math.max(pixelScaleX, 0.000001);
+    const pixelDirectionY = normal.z / Math.max(pixelScaleY, 0.000001);
+    const directionLength = Math.hypot(pixelDirectionX, pixelDirectionY);
+    if (directionLength <= 0.0001) return null;
+    const dx = pixelDirectionX / directionLength;
+    const dy = pixelDirectionY / directionLength;
+    const maxSteps = Math.min(64, Math.max(mask.width, mask.height));
+    for (let step = 1; step <= maxSteps; step += 1) {
+      const x = Math.round(wallPixel.x + dx * step);
+      const y = Math.round(wallPixel.y + dy * step);
+      if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) return null;
+      if (!mask.mask[y * mask.width + x]) {
+        return pixelToPlanPoint(x, y, mask, bounds);
+      }
+    }
     return null;
   }
 
@@ -3972,49 +4367,94 @@
 
     model.position.copy(position);
     box = getPlanBox(model);
-    const wallSnap = findNearestWallSnap(box);
-    if (wallSnap) {
-      position.x += wallSnap.dx;
-      position.z += wallSnap.dz;
-      messages.push("벽면 자석 스냅");
-    }
-
-    model.position.copy(position);
-    box = getPlanBox(model);
-    const imageWallSnap = findNearestImageWallSnap(box);
-    if (imageWallSnap) {
-      position.x += imageWallSnap.dx;
-      position.z += imageWallSnap.dz;
-      messages.push("이미지 벽면 자석 스냅");
+    const wallSnaps = selectCompatibleWallSnaps([
+      ...getWallSnapCandidates(box, undefined, model),
+      ...findImageWallAxisSnapCandidates(box, undefined),
+    ]);
+    if (wallSnaps.length > 0) {
+      const correction = combineWallSnapCorrections(wallSnaps);
+      position.x += correction.dx;
+      position.z += correction.dz;
+      messages.push(wallSnaps.length > 1 ? "모서리 자석 스냅" : "벽면 자석 스냅");
     }
 
     model.position.copy(original);
     return { position, message: messages.join(", ") };
   }
 
-  function findNearestWallSnap(modelBox) {
-    let best = null;
-    state.wallObjects.forEach((wall) => {
-      const orientedSnap = getOrientedWallSnap(modelBox, wall);
-      if (orientedSnap) considerSnap(orientedSnap);
-    });
-    return best;
-
-    function considerSnap(snap) {
-      if (!snap || snap.gap < 0 || snap.gap > WALL_MAGNET_DISTANCE) return;
-      if (!best || snap.gap < best.gap) best = snap;
-    }
+  function findNearestWallSnap(modelBox, targetGap, model) {
+    const candidates = getWallSnapCandidates(modelBox, targetGap, model);
+    return candidates.length > 0 ? candidates[0] : null;
   }
 
-  function findBestWallSnap(modelBox) {
-    const vectorSnap = findNearestWallSnap(modelBox);
-    const imageSnap = findNearestImageWallSnap(modelBox);
+  function getWallSnapCandidates(modelBox, targetGap, model) {
+    return state.wallObjects
+      .map((wall) => getOrientedWallSnap(modelBox, wall, targetGap, model))
+      .filter((snap) => snap && snap.gap >= 0 && snap.gap <= WALL_MAGNET_DISTANCE)
+      .sort(compareWallSnaps);
+  }
+
+  function compareWallSnaps(a, b) {
+    const gapDifference = a.gap - b.gap;
+    if (Math.abs(gapDifference) > 0.0001) return gapDifference;
+    return Math.hypot(a.dx, a.dz) - Math.hypot(b.dx, b.dz);
+  }
+
+  function selectCompatibleWallSnaps(candidates) {
+    const valid = candidates
+      .filter((snap) => snap
+        && Number.isFinite(snap.dx)
+        && Number.isFinite(snap.dz)
+        && snap.gap >= 0
+        && snap.gap <= WALL_MAGNET_DISTANCE)
+      .sort(compareWallSnaps);
+    if (valid.length < 2) return valid.slice(0, 1);
+
+    let bestPair = null;
+    let bestScore = Infinity;
+    for (let i = 0; i < valid.length - 1; i += 1) {
+      for (let j = i + 1; j < valid.length; j += 1) {
+        const first = valid[i];
+        const second = valid[j];
+        const normalDot = Math.abs(
+          first.normalX * second.normalX + first.normalZ * second.normalZ
+        );
+        if (normalDot > WALL_CORNER_MAX_NORMAL_DOT) continue;
+        const score = Math.max(first.gap, second.gap) * 2 + first.gap + second.gap;
+        if (score < bestScore) {
+          bestScore = score;
+          bestPair = [first, second];
+        }
+      }
+    }
+    return bestPair || valid.slice(0, 1);
+  }
+
+  function combineWallSnapCorrections(snaps) {
+    if (snaps.length < 2) {
+      return snaps[0] || { dx: 0, dz: 0 };
+    }
+    const first = snaps[0];
+    const second = snaps[1];
+    const firstDistance = first.dx * first.normalX + first.dz * first.normalZ;
+    const secondDistance = second.dx * second.normalX + second.dz * second.normalZ;
+    const determinant = first.normalX * second.normalZ - first.normalZ * second.normalX;
+    if (Math.abs(determinant) < 0.001) return first;
+    return {
+      dx: (firstDistance * second.normalZ - first.normalZ * secondDistance) / determinant,
+      dz: (first.normalX * secondDistance - firstDistance * second.normalX) / determinant,
+    };
+  }
+
+  function findBestWallSnap(modelBox, targetGap, model) {
+    const vectorSnap = findNearestWallSnap(modelBox, targetGap, model);
+    const imageSnap = findNearestImageWallSnap(modelBox, targetGap, model);
     if (!vectorSnap) return imageSnap;
     if (!imageSnap) return vectorSnap;
     return vectorSnap.gap <= imageSnap.gap ? vectorSnap : imageSnap;
   }
 
-  function getOrientedWallSnap(modelBox, wall) {
+  function getOrientedWallSnap(modelBox, wall, targetGap, model) {
     const params = wall.geometry && wall.geometry.parameters;
     if (!params) return null;
     const wallLength = Number(params.width) || 0;
@@ -4028,10 +4468,8 @@
       x: (modelBox.minX + modelBox.maxX) / 2,
       z: (modelBox.minZ + modelBox.maxZ) / 2,
     };
-    const modelHalfX = (modelBox.maxX - modelBox.minX) / 2;
-    const modelHalfZ = (modelBox.maxZ - modelBox.minZ) / 2;
-    const modelHalfAlong = Math.abs(axis.x) * modelHalfX + Math.abs(axis.z) * modelHalfZ;
-    const modelHalfNormal = Math.abs(normal.x) * modelHalfX + Math.abs(normal.z) * modelHalfZ;
+    const modelHalfAlong = getModelHalfExtentAlong(model, axis, modelBox);
+    const modelHalfNormal = getModelHalfExtentAlong(model, normal, modelBox);
     const rel = {
       x: modelCenter.x - wall.position.x,
       z: modelCenter.z - wall.position.z,
@@ -4044,17 +4482,103 @@
     const side = normalDistance >= 0 ? 1 : -1;
     const gap = Math.abs(normalDistance) - wallThickness / 2 - modelHalfNormal;
     if (gap < -WALL_BUFFER || gap > WALL_MAGNET_DISTANCE) return null;
-    const targetDistance = side * (wallThickness / 2 + modelHalfNormal + WALL_BUFFER);
+    const gapFromWall = Number.isFinite(targetGap) ? Math.max(0, targetGap) : WALL_BUFFER;
+    const targetDistance = side * (wallThickness / 2 + modelHalfNormal + gapFromWall);
     const delta = targetDistance - normalDistance;
     return {
       gap: Math.max(0, gap),
       dx: normal.x * delta,
       dz: normal.z * delta,
+      normalX: normal.x * side,
+      normalZ: normal.z * side,
       rotationY: wall.rotation.y || 0,
     };
   }
 
-  function findNearestImageWallSnap(modelBox) {
+  function findImageWallAxisSnapCandidates(modelBox, targetGap) {
+    if (!state.imageWallMask || !state.floorBounds) return [];
+    const mask = state.imageWallMask;
+    const bounds = state.floorBounds;
+    const cellW = bounds.width / Math.max(mask.width - 1, 1);
+    const cellD = bounds.depth / Math.max(mask.height - 1, 1);
+    const maxOffsetX = Math.max(1, Math.ceil(WALL_MAGNET_DISTANCE / cellW));
+    const maxOffsetY = Math.max(1, Math.ceil(WALL_MAGNET_DISTANCE / cellD));
+    const pixelBox = planBoxToPixelBox(modelBox, mask, bounds);
+    // X 스냅은 가구의 세로 범위, Z 스냅은 가로 범위 안의 벽만 찾는다.
+    // 범위를 코너 바깥까지 넓히면 수평 벽의 끝 픽셀을 수직 벽으로 오인해
+    // 한 벽에만 가까워도 잘못된 코너 스냅이 생긴다.
+    const minX = pixelBox.minX;
+    const maxX = pixelBox.maxX;
+    const minY = pixelBox.minY;
+    const maxY = pixelBox.maxY;
+    const gapFromWall = Number.isFinite(targetGap) ? Math.max(0, targetGap) : WALL_BUFFER;
+    const candidates = [];
+
+    const left = findFirstMaskStrip(mask, "x", pixelBox.minX, -1, maxOffsetX, minY, maxY);
+    if (left) {
+      const wallX = pixelToPlanPoint(left.coordinate, 0, mask, bounds).x;
+      const gap = Math.max(0, modelBox.minX - wallX);
+      candidates.push({
+        gap,
+        dx: wallX + gapFromWall - modelBox.minX,
+        dz: 0,
+        normalX: 1,
+        normalZ: 0,
+      });
+    }
+    const right = findFirstMaskStrip(mask, "x", pixelBox.maxX, 1, maxOffsetX, minY, maxY);
+    if (right) {
+      const wallX = pixelToPlanPoint(right.coordinate, 0, mask, bounds).x;
+      const gap = Math.max(0, wallX - modelBox.maxX);
+      candidates.push({
+        gap,
+        dx: wallX - gapFromWall - modelBox.maxX,
+        dz: 0,
+        normalX: -1,
+        normalZ: 0,
+      });
+    }
+    const top = findFirstMaskStrip(mask, "y", pixelBox.minY, -1, maxOffsetY, minX, maxX);
+    if (top) {
+      const wallZ = pixelToPlanPoint(0, top.coordinate, mask, bounds).z;
+      const gap = Math.max(0, modelBox.minZ - wallZ);
+      candidates.push({
+        gap,
+        dx: 0,
+        dz: wallZ + gapFromWall - modelBox.minZ,
+        normalX: 0,
+        normalZ: 1,
+      });
+    }
+    const bottom = findFirstMaskStrip(mask, "y", pixelBox.maxY, 1, maxOffsetY, minX, maxX);
+    if (bottom) {
+      const wallZ = pixelToPlanPoint(0, bottom.coordinate, mask, bounds).z;
+      const gap = Math.max(0, wallZ - modelBox.maxZ);
+      candidates.push({
+        gap,
+        dx: 0,
+        dz: wallZ - gapFromWall - modelBox.maxZ,
+        normalX: 0,
+        normalZ: -1,
+      });
+    }
+    return candidates.filter((snap) => snap.gap <= WALL_MAGNET_DISTANCE);
+  }
+
+  function findFirstMaskStrip(mask, axis, start, direction, maxOffset, rangeMin, rangeMax) {
+    for (let offset = 0; offset <= maxOffset; offset += 1) {
+      const coordinate = start + direction * offset;
+      const limit = axis === "x" ? mask.width : mask.height;
+      if (coordinate < 0 || coordinate >= limit) break;
+      const hits = axis === "x"
+        ? sumMaskArea(mask.integral, mask.width, coordinate, rangeMin, coordinate, rangeMax)
+        : sumMaskArea(mask.integral, mask.width, rangeMin, coordinate, rangeMax, coordinate);
+      if (hits > 0) return { coordinate, offset };
+    }
+    return null;
+  }
+
+  function findNearestImageWallSnap(modelBox, targetGap, model) {
     if (!state.imageWallMask || !state.floorBounds) return null;
     const mask = state.imageWallMask;
     const center = {
@@ -4079,13 +4603,16 @@
           if (distance <= 0 || distance > WALL_MAGNET_DISTANCE) continue;
           const nx = vx / distance;
           const nz = vz / distance;
-          const modelHalfX = (modelBox.maxX - modelBox.minX) / 2;
-          const modelHalfZ = (modelBox.maxZ - modelBox.minZ) / 2;
-          const modelHalfTowardWall = Math.abs(nx) * modelHalfX + Math.abs(nz) * modelHalfZ;
+          const modelHalfTowardWall = getModelHalfExtentAlong(
+            model,
+            { x: nx, z: nz },
+            modelBox
+          );
           const gap = distance - modelHalfTowardWall;
           if (gap < -WALL_BUFFER || gap > WALL_MAGNET_DISTANCE) continue;
           if (!best || Math.max(0, gap) < best.gap) {
-            const targetDistance = modelHalfTowardWall + WALL_BUFFER;
+            const gapFromWall = Number.isFinite(targetGap) ? Math.max(0, targetGap) : WALL_BUFFER;
+            const targetDistance = modelHalfTowardWall + gapFromWall;
             best = {
               gap: Math.max(0, gap),
               dx: wallPoint.x + nx * targetDistance - center.x,
@@ -4099,6 +4626,25 @@
       if (best) return best;
     }
     return null;
+  }
+
+  function getModelHalfExtentAlong(model, direction, fallbackBox) {
+    if (model) {
+      const centerX = model.position.x;
+      const centerZ = model.position.z;
+      const footprint = getPlanFootprint(model);
+      let extent = 0;
+      footprint.forEach((point) => {
+        const projected = Math.abs(
+          (point.x - centerX) * direction.x + (point.z - centerZ) * direction.z
+        );
+        extent = Math.max(extent, projected);
+      });
+      if (extent > 0.0001) return extent;
+    }
+    const halfX = (fallbackBox.maxX - fallbackBox.minX) / 2;
+    const halfZ = (fallbackBox.maxZ - fallbackBox.minZ) / 2;
+    return Math.abs(direction.x) * halfX + Math.abs(direction.z) * halfZ;
   }
 
   function rangesOverlap(aMin, aMax, bMin, bMax, margin) {
@@ -4117,9 +4663,9 @@
 
   function getBlockedPlacementReason(model, box, cachedFootprint, cachedWallFootprints) {
     if (isOutsideBounds(box)) return "평면도 경계 밖";
-    if (boxIntersectsImageWall(box)) return "이미지 평면도 벽";
-    if (boxIntersectsNonResidentialArea(box)) return "회색 비실사용 공간";
-    if (boxOutsideImageFloor(box)) return "타일 바닥 영역 밖";
+    if (boxIntersectsImageWall(box, model)) return "이미지 평면도 벽";
+    if (boxIntersectsNonResidentialArea(box, model)) return "회색 비실사용 공간";
+    if (boxOutsideImageFloor(box, model)) return "타일 바닥 영역 밖";
     const modelFootprint = cachedFootprint || getPlanFootprint(model);
     const wallFootprints = cachedWallFootprints || state.wallObjects.map((wall) => getPlanFootprint(wall));
     for (const wallFootprint of wallFootprints) {
@@ -4128,17 +4674,24 @@
     return "";
   }
 
-  function boxIntersectsImageWall(box) {
+  function boxIntersectsImageWall(box, model) {
     if (!state.imageWallMask || !state.floorBounds) return false;
     const mask = state.imageWallMask;
     const bounds = state.floorBounds;
     const pixelBox = planBoxToPixelBox(box, mask, bounds);
     const area = Math.max((pixelBox.maxX - pixelBox.minX + 1) * (pixelBox.maxY - pixelBox.minY + 1), 1);
     const hits = sumMaskArea(mask.integral, mask.width, pixelBox.minX, pixelBox.minY, pixelBox.maxX, pixelBox.maxY);
-    return hits >= 3 && hits / area >= IMAGE_WALL_HIT_RATIO;
+    if (hits < 3 || hits / area < IMAGE_WALL_HIT_RATIO) return false;
+    if (!model) return true;
+    let sampleHits = 0;
+    forEachModelFootprintSample(model, 9, 0.05, (point) => {
+      const pixel = planPointToPixel(point.x, point.z, mask, bounds);
+      if (mask.mask[pixel.y * mask.width + pixel.x]) sampleHits += 1;
+    });
+    return sampleHits > 0;
   }
 
-  function boxIntersectsNonResidentialArea(box) {
+  function boxIntersectsNonResidentialArea(box, model) {
     if (!state.nonResidentialMask || !state.floorBounds) return false;
     const mask = state.nonResidentialMask;
     const pixelBox = planBoxToPixelBox(box, mask, state.floorBounds);
@@ -4154,15 +4707,35 @@
       pixelBox.maxX,
       pixelBox.maxY
     );
-    return hits / area >= 0.02;
+    if (hits / area < 0.02) return false;
+    if (!model) return true;
+    let sampleHits = 0;
+    let sampleCount = 0;
+    forEachModelFootprintSample(model, 9, 0.04, (point) => {
+      const pixel = planPointToPixel(point.x, point.z, mask, state.floorBounds);
+      sampleCount += 1;
+      if (mask.mask[pixel.y * mask.width + pixel.x]) sampleHits += 1;
+    });
+    return sampleHits / Math.max(sampleCount, 1) >= 0.02;
   }
 
-  function boxOutsideImageFloor(box) {
+  function boxOutsideImageFloor(box, model) {
     if (!state.imageFloorMask || !state.floorBounds) return false;
     const mask = state.imageFloorMask;
     const bounds = state.floorBounds;
     const center = planPointToPixel((box.minX + box.maxX) / 2, (box.minZ + box.maxZ) / 2, mask, bounds);
     if (!isNearbyFloorPixel(mask, center.x, center.y, 2)) return true;
+
+    if (model && getFootprintDimensions(model)) {
+      let floorSamples = 0;
+      let totalSamples = 0;
+      forEachModelFootprintSample(model, IMAGE_FLOOR_SAMPLE_GRID, 0.08, (point) => {
+        const pixel = planPointToPixel(point.x, point.z, mask, bounds);
+        totalSamples += 1;
+        if (isFloorPixel(mask, pixel.x, pixel.y)) floorSamples += 1;
+      });
+      return floorSamples / Math.max(totalSamples, 1) < IMAGE_FLOOR_REQUIRED_RATIO;
+    }
 
     const insetX = Math.max((box.maxX - box.minX) * 0.08, 0.02);
     const insetZ = Math.max((box.maxZ - box.minZ) * 0.08, 0.02);
@@ -4184,6 +4757,27 @@
     }
 
     return floorSamples / Math.max(totalSamples, 1) < IMAGE_FLOOR_REQUIRED_RATIO;
+  }
+
+  function forEachModelFootprintSample(model, gridSize, insetRatio, callback) {
+    const dims = getFootprintDimensions(model);
+    if (!dims) return;
+    const inset = clamp(insetRatio || 0, 0, 0.45);
+    const halfW = dims.width * (0.5 - inset);
+    const halfD = dims.depth * (0.5 - inset);
+    const cos = Math.cos(model.rotation.y || 0);
+    const sin = Math.sin(model.rotation.y || 0);
+    const denominator = Math.max(gridSize - 1, 1);
+    for (let ix = 0; ix < gridSize; ix += 1) {
+      const localX = -halfW + (halfW * 2 * ix) / denominator;
+      for (let iz = 0; iz < gridSize; iz += 1) {
+        const localZ = -halfD + (halfD * 2 * iz) / denominator;
+        callback({
+          x: model.position.x + localX * cos + localZ * sin,
+          z: model.position.z - localX * sin + localZ * cos,
+        });
+      }
+    }
   }
 
   function planBoxToPixelBox(box, mask, bounds) {
@@ -4299,20 +4893,21 @@
       && a.maxZ > b.minZ + COLLISION_EPSILON;
   }
 
-  function getPlanFootprint(object) {
+  function getPlanFootprint(object, padding) {
+    const safePadding = Math.max(0, Number(padding) || 0);
     const dims = getFootprintDimensions(object);
     if (!dims) {
       const box = getPlanBox(object);
       return [
-        { x: box.minX, z: box.minZ },
-        { x: box.maxX, z: box.minZ },
-        { x: box.maxX, z: box.maxZ },
-        { x: box.minX, z: box.maxZ },
+        { x: box.minX - safePadding, z: box.minZ - safePadding },
+        { x: box.maxX + safePadding, z: box.minZ - safePadding },
+        { x: box.maxX + safePadding, z: box.maxZ + safePadding },
+        { x: box.minX - safePadding, z: box.maxZ + safePadding },
       ];
     }
 
-    const halfW = dims.width / 2;
-    const halfD = dims.depth / 2;
+    const halfW = dims.width / 2 + safePadding;
+    const halfD = dims.depth / 2 + safePadding;
     const cos = Math.cos(object.rotation.y || 0);
     const sin = Math.sin(object.rotation.y || 0);
     return [
@@ -4564,53 +5159,123 @@
     state.activePattern = pattern.code;
     renderTrendPatterns();
     clearFurniture();
+    await applyTrendMaterials(pattern);
     state.suppressAutoSelect = true;
     let placedCount = 0;
-    const roomUseCount = new Map();
     try {
-      // 순서대로 배치해야 먼저 놓인 가구와 겹치지 않는 다음 빈자리를 찾는다.
+      // 패턴에 선언된 가구를 정확히 한 개씩만 순서대로 배치한다.
+      // 침실 OCR 라벨 수를 반복 횟수로 사용하지 않아 침대 중복을 막는다.
       for (const placement of pattern.placements) {
-        const item = findCatalogItem(placement.category);
+        const item = findCatalogItem(placement.category, pattern);
         if (!item) continue;
-        const repeatCount = placement.eachRoom
-          ? Math.max(1, countRecognizedRooms(placement.targetRoom))
-          : 1;
-        for (let repeat = 0; repeat < repeatCount; repeat += 1) {
-          const roomKey = placement.targetRoom || placement.category;
-          const roomIndex = roomUseCount.get(roomKey) || 0;
-          await spawnFurniture(item, {
-            ...placement,
-            roomIndex,
-            autoPlace: true,
-            fastPlan: true,
-            wallPreferred: shouldPreferWallPlacement(placement.category),
-            select: false,
-          });
-          roomUseCount.set(roomKey, roomIndex + 1);
-          placedCount += 1;
-        }
+        const placed = await spawnFurniture(item, {
+          ...placement,
+          roomIndex: 0,
+          autoPlace: true,
+          fastPlan: true,
+          wallPreferred: shouldPreferWallPlacement(placement.category),
+          cardinalRotation: true,
+          select: false,
+        });
+        if (placed) placedCount += 1;
       }
     } finally {
       state.suppressAutoSelect = false;
     }
     updateSceneStatus(
       "추천 패턴 적용",
-      `${pattern.code} ${pattern.name} 가구 ${placedCount}개를 실내에 배치했습니다.`
+      `${pattern.code} ${pattern.name} · ${getActiveFloorMaterial().label} · ${getActiveWallMaterial().label} · 가구 ${placedCount}개`
     );
   }
 
-  function findCatalogItem(category) {
-    return state.catalogItems.find((item) => {
-      const categoryOk = !category || String(item.category || "").includes(category) || String(item.product_name || "").includes(category);
-      return categoryOk;
-    });
+  async function applyTrendMaterials(pattern) {
+    const floorValue = findThemeMaterialValue(
+      getFloorMaterials(),
+      pattern.floorMaterials,
+      pattern.floorFallbackIndex
+    );
+    const wallValue = findThemeMaterialValue(
+      getWallMaterials(),
+      pattern.wallMaterials,
+      pattern.wallFallbackIndex
+    );
+    if (floorValue) state.activeFloorMaterial = floorValue;
+    if (wallValue) state.activeWallMaterial = wallValue;
+
+    // 추천은 특정 방 선택 상태와 관계없이 평면도 전체 스타일을 바꾼다.
+    state.selectedRoomId = null;
+    renderFloorMaterials();
+    renderWallMaterials();
+    await applyFloorMaterial();
+    await applyWallMaterial();
   }
 
-  function countRecognizedRooms(roomType) {
-    if (!roomType) return 0;
-    return state.roomLabelObjects.filter(
-      (label) => label.userData && label.userData.roomType === roomType
-    ).length;
+  function findThemeMaterialValue(materials, preferredTerms, fallbackIndex) {
+    if (!Array.isArray(materials) || materials.length === 0) return "";
+    const terms = (preferredTerms || [])
+      .map((term) => String(term || "").normalize("NFC").toLowerCase())
+      .filter(Boolean);
+    for (const term of terms) {
+      const exact = materials.find((material) => {
+        const value = String(material.value || "").normalize("NFC").toLowerCase();
+        const code = String(material.productCode || "").normalize("NFC").toLowerCase();
+        return value === term || code === term;
+      });
+      if (exact) return exact.value;
+    }
+    for (const term of terms) {
+      const partial = materials.find((material) => {
+        const text = [material.value, material.productCode, material.label, material.series]
+          .join(" ")
+          .normalize("NFC")
+          .toLowerCase();
+        return text.includes(term);
+      });
+      if (partial) return partial.value;
+    }
+    const index = clamp(Number(fallbackIndex) || 0, 0, materials.length - 1);
+    return materials[index].value;
+  }
+
+  function findCatalogItem(category, pattern) {
+    const candidates = state.catalogItems.filter((item) => {
+      return !category
+        || String(item.category || "").includes(category)
+        || String(item.product_name || "").includes(category);
+    });
+    if (candidates.length === 0) return null;
+
+    const preferredColors = Array.isArray(pattern && pattern.colors)
+      ? pattern.colors.map(normalizeColor)
+      : [normalizeColor(pattern && pattern.color)];
+    const preferredNames = pattern && pattern.productKeywords
+      ? pattern.productKeywords[category] || []
+      : [];
+
+    return candidates
+      .map((item, index) => ({
+        item,
+        index,
+        score: getThemeFurnitureScore(item, preferredColors, preferredNames),
+      }))
+      .sort((a, b) => b.score - a.score || a.index - b.index)[0].item;
+  }
+
+  function getThemeFurnitureScore(item, preferredColors, preferredNames) {
+    const itemColor = normalizeColor(item.color);
+    const colorIndex = preferredColors.indexOf(itemColor);
+    // 테마는 제품명보다 색상 팔레트를 우선한다. 같은 색상 안에서는
+    // 테마별 대표 제품 키워드 순서로 가장 잘 어울리는 모델을 고른다.
+    let score = colorIndex >= 0 ? 300 - colorIndex * 80 : 0;
+    const searchableName = String(item.product_name || "").normalize("NFC").toUpperCase();
+    preferredNames.forEach((keyword, index) => {
+      const normalizedKeyword = String(keyword).normalize("NFC").toUpperCase();
+      if (normalizedKeyword && searchableName.includes(normalizedKeyword)) {
+        score += Math.max(60, 120 - index * 20);
+      }
+    });
+    if (item.model_path) score += 5;
+    return score;
   }
 
   function shouldPreferWallPlacement(category) {
@@ -4660,6 +5325,7 @@
     visualization.name = "acceptedLayoutVisualization";
     state.renderedFurnitureMeshes = [];
     addRenderedRoomFloors(visualization);
+    addRenderedNonResidentialAreas(visualization);
     addRenderedWalls(visualization);
     state.scene.add(visualization);
     state.visualizationGroup = visualization;
@@ -4829,6 +5495,85 @@
       rendered.quaternion.copy(wall.quaternion);
       group.add(rendered);
     });
+  }
+
+  function addRenderedNonResidentialAreas(group) {
+    if (!group || !state.nonResidentialMask || !state.floorBounds) return;
+    const alreadyRendered = group.children.some(
+      (child) => child.userData && child.userData.type === "renderedNonResidentialMask"
+    );
+    if (alreadyRendered) return;
+
+    const rendered = createRenderedNonResidentialMaskMesh(
+      state.nonResidentialMask,
+      state.floorBounds
+    );
+    if (rendered) group.add(rendered);
+  }
+
+  function createRenderedNonResidentialMaskMesh(maskData, bounds) {
+    const mask = maskData.mask;
+    const width = maskData.width;
+    const height = maskData.height;
+    if (!mask || !width || !height) return null;
+
+    const raisedHeight = 2.4 * RENDERED_WALL_HEIGHT_RATIO * NON_RESIDENTIAL_HEIGHT_RATIO;
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const groups = [];
+    const cellW = bounds.width / width;
+    const cellD = bounds.depth / height;
+
+    // 같은 행에서 이어진 마스크 픽셀을 하나의 박스로 묶어 메시 수와 draw call을
+    // 줄인다. 외곽 윤곽은 원본 회색 마스크 해상도를 그대로 따른다.
+    for (let y = 0; y < height; y += 1) {
+      let x = 0;
+      while (x < width) {
+        while (x < width && !mask[y * width + x]) x += 1;
+        if (x >= width) break;
+        const startX = x;
+        while (x < width && mask[y * width + x]) x += 1;
+        addBoxToGeometryBuffers(
+          positions,
+          normals,
+          indices,
+          groups,
+          bounds.minX + startX * cellW,
+          bounds.minX + x * cellW,
+          0,
+          raisedHeight,
+          bounds.minZ + y * cellD,
+          bounds.minZ + (y + 1) * cellD
+        );
+      }
+    }
+
+    if (positions.length === 0) return null;
+    const topAndBottomIndices = [];
+    const sideIndices = [];
+    groups.forEach((entry) => {
+      const target = entry.materialIndex === 0 ? topAndBottomIndices : sideIndices;
+      target.push(...indices.slice(entry.start, entry.start + entry.count));
+    });
+    const orderedIndices = topAndBottomIndices.concat(sideIndices);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setIndex(orderedIndices);
+    geometry.addGroup(0, topAndBottomIndices.length, 0);
+    geometry.addGroup(topAndBottomIndices.length, sideIndices.length, 1);
+    geometry.computeBoundingSphere();
+
+    const mesh = new THREE.Mesh(geometry, [
+      new THREE.MeshStandardMaterial({ color: 0xb0b5be, roughness: 0.88 }),
+      new THREE.MeshStandardMaterial({ color: 0x858b95, roughness: 0.9 }),
+    ]);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData.type = "renderedNonResidentialMask";
+    mesh.userData.renderHeight = raisedHeight;
+    return mesh;
   }
 
   function isCustomPlanningWall(wall) {
@@ -5150,11 +5895,15 @@
     if (payload.schema && payload.schema !== "duo-layout") {
       throw new Error("평면도 파일이 아니라 배치 저장 파일을 선택해주세요.");
     }
+    // clearFurniture()는 진행 중인 비동기 모델 로드를 취소하기 위해
+    // floorPlanVersion을 올린다. 평면도를 먼저 불러온 뒤 호출하면 벽/공용공간
+    // 마스크 콜백까지 이전 작업으로 간주되어 영구히 사라지므로 반드시 먼저
+    // 기존 가구를 정리한다.
+    clearFurniture();
     if (payload.floorPlan) {
       loadFloorPlan(payload.floorPlan);
       getCanvasContainer().classList.add("has-plan");
     }
-    clearFurniture();
     if (payload.floorBounds && !payload.floorPlan) setFloorBounds(payload.floorBounds);
     state.activePattern = payload.activePattern || "A";
     state.activeFloorMaterial = payload.activeFloorMaterial || state.activeFloorMaterial;
@@ -5533,7 +6282,14 @@
   }
 
   function normalizeColor(color) {
-    return String(color || "gray").toLowerCase().replace("grey", "gray").trim();
+    const value = String(color || "gray").toLowerCase().replaceAll("grey", "gray").trim();
+    if (value.includes("black") || value.includes("블랙") || value.includes("검정")) return "black";
+    if (value.includes("blue") || value.includes("블루") || value.includes("파랑") || value.includes("청색")) return "blue";
+    if (value.includes("brown") || value.includes("브라운") || value.includes("갈색") || value.includes("호두")) return "brown";
+    if (value.includes("gray") || value.includes("그레이") || value.includes("회색") || value.includes("실버")) return "gray";
+    if (value.includes("white") || value.includes("화이트") || value.includes("베이지")
+        || value.includes("아이보리") || value.includes("크림") || value.includes("네이처")) return "white";
+    return value;
   }
 
   function formatDimensions(item) {

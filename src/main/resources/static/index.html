@@ -6,7 +6,7 @@
   <title>Hyundai Engineering - 3D Space Simulator</title>
 
   <link rel="icon" href="data:;base64,iVBORw0KGgo=">
-  <link rel="stylesheet" href="/static/css/style.css?v=8">
+  <link rel="stylesheet" href="/static/css/style.css?v=9">
 </head>
 <body data-auth-required>
 
@@ -42,6 +42,12 @@
 
   <main>
     <aside id="sidebar">
+      <div class="sidebar-intro">
+        <span>SPATIAL STUDIO</span>
+        <h1>공간 스타일링</h1>
+        <p>평면 위에 가구와 마감재를 배치하고 바로 3D로 확인하세요.</p>
+      </div>
+
       <section class="panel-section">
         <div class="section-header">
           <h2>추천 패턴</h2>
@@ -96,6 +102,8 @@
       </div>
 
       <div id="canvas-empty-state">
+        <div class="empty-state-icon" aria-hidden="true">✦</div>
+        <small>START A NEW SPACE</small>
         <strong>평면도를 불러와 시작하세요</strong>
         <span>JSON 평면도를 올리면 편집 가능한 2D 공간으로 자동 변환합니다.</span>
         <label for="floorPlanInput" class="primary-btn">파일 선택</label>
@@ -144,7 +152,7 @@
   <script src="/static/js/auth-nav.js?v=3"></script>
   <script src="/static/js/api-client.js?v=1"></script>
   <script src="/static/js/runtime-performance.js?v=2"></script>
-  <script src="/static/js/main.js?v=57"></script>
+  <script src="/static/js/main.js?v=70"></script>
 
 </body>
 </html>

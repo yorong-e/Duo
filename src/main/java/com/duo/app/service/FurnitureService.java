@@ -283,15 +283,14 @@ public class FurnitureService {
         }
 
         String value = color.toLowerCase(Locale.ROOT).trim();
-        return switch (value) {
-            case "grey" -> "gray";
-            case "dark grey", "dark gray" -> "black";
-            case "off-white", "beige", "natural", "cream", "화이트", "베이지", "아이보리" -> "white";
-            case "그레이", "회색" -> "gray";
-            case "브라운", "갈색" -> "brown";
-            case "블랙", "검정", "검은색" -> "black";
-            case "블루", "파랑", "파란색" -> "blue";
-            default -> value;
-        };
+        if (value.contains("black") || value.contains("블랙") || value.contains("검정")) return "black";
+        if (value.contains("blue") || value.contains("블루") || value.contains("파랑") || value.contains("청색")) return "blue";
+        if (value.contains("brown") || value.contains("브라운") || value.contains("갈색") || value.contains("호두")) return "brown";
+        if (value.contains("grey") || value.contains("gray") || value.contains("그레이")
+                || value.contains("회색") || value.contains("실버")) return "gray";
+        if (value.contains("white") || value.contains("beige") || value.contains("natural")
+                || value.contains("cream") || value.contains("화이트") || value.contains("베이지")
+                || value.contains("아이보리") || value.contains("크림") || value.contains("네이처")) return "white";
+        return value;
     }
 }

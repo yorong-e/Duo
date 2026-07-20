@@ -225,9 +225,11 @@
     activeCatalogSection: "furniture",
     activeFurnitureCategory: "",
     activeFloorMaterial: "oak",
+    floorMaterialSelectionVersion: 0,
     activeWallMaterial: "white",
     wallOverlayMaterial: "",
     wallOverlayApplied: false,
+    pendingFloorApplication: null,
     activePattern: "A",
     lastWarnings: [],
     blockedDragWarning: "",
@@ -242,6 +244,7 @@
   const scheduleSafetyState = window.DuoPerformance.createFrameThrottle(updateSafetyState);
   const scheduleEstimateUpdate = window.DuoPerformance.createFrameThrottle(updateEstimate);
   const textureLoader = new THREE.TextureLoader();
+  const floorImageCache = new Map();
   const raycaster = new THREE.Raycaster();
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const pointerNDC = new THREE.Vector2();
@@ -919,6 +922,10 @@
 
   function loadFloorPlan(planData) {
     state.currentPlanData = planData;
+    // 이전 평면도에서 방 생성 전에 눌렀던 바닥재 예약이 새 평면도로
+    // 넘어가지 않게 한다. 현재 평면도 분석 중의 클릭은 아래 로더가
+    // clearFloorPlan을 호출한 뒤 다시 pendingFloorApplication에 저장된다.
+    state.pendingFloorApplication = null;
     if (isEditableFloorPlan(planData)) {
       loadReconstructedFloorPlan(planData);
       return;
@@ -955,8 +962,13 @@
 
   function loadImageFloorPlan(planData, imageDataUri) {
     const attrs = getFloorPlanPixelSize(planData);
+    clearFloorPlan();
+    const loadVersion = state.floorPlanVersion;
     textureLoader.load(imageDataUri, (texture) => {
-      clearFloorPlan();
+      if (loadVersion !== state.floorPlanVersion) {
+        texture.dispose();
+        return;
+      }
       const scale = FLOOR_PLAN_PIXEL_TO_SCENE;
       const planeW = attrs.width * scale;
       const planeH = attrs.height * scale;
@@ -979,16 +991,30 @@
       state.scene.add(group);
       state.floorPlanGroup = group;
       setFloorBounds({ minX: -planeW / 2, maxX: planeW / 2, minZ: -planeH / 2, maxZ: planeH / 2 });
-      buildImageFloorMask(imageDataUri, attrs.width, attrs.height, planeW, planeH);
+      buildImageFloorMask(imageDataUri, attrs.width, attrs.height, planeW, planeH, group, loadVersion, texture.image);
       focusCameraOnPlanContent(planeW, planeH, new THREE.Vector3(0, 0, 0));
       updateSceneStatus("평면도 로드 완료", "타일 바닥색 영역만 가구 배치 가능 영역으로 인식합니다.");
       updateSafetyState();
+    }, undefined, () => {
+      if (loadVersion !== state.floorPlanVersion) return;
+      updateSceneStatus("평면도 로드 실패", "평면도 이미지를 불러오지 못했습니다.");
+      invalidateRender();
     });
   }
 
-  function buildImageFloorMask(imageDataUri, width, height, planeW, planeH) {
-    const img = new Image();
+  function buildImageFloorMask(imageDataUri, width, height, planeW, planeH, group, loadVersion, loadedImage) {
+    // TextureLoader가 이미 디코딩한 이미지를 재사용해 같은 대형 data URI를
+    // Image 두 개로 중복 디코딩하지 않는다.
+    const img = loadedImage || new Image();
     img.onload = () => {
+      if (loadVersion !== state.floorPlanVersion || !group || !group.parent) return;
+      // 원본 도면은 4K 이상인 경우가 많다. 원본 크기로 RGBA·바닥·벽
+      // 배열을 동시에 만들면 한 번의 분석에 수백 MB가 필요해 이미지 로드
+      // 완료가 누락될 수 있으므로 방 편집 해상도에서 분석한다.
+      const sourceWidth = width;
+      const sourceHeight = height;
+      width = Math.min(FLOOR_MASK_TARGET_WIDTH, sourceWidth);
+      height = Math.max(96, Math.round(width * sourceHeight / Math.max(sourceWidth, 1)));
       const canvas = document.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
@@ -1040,18 +1066,85 @@
         mask: wallMask,
         integral: buildMaskIntegral(wallMask, width, height),
       };
+      createImageFloorRoom(group, mask, width, height);
       updateSceneStatus(
         "바닥색 분석 완료",
         `베이지 바닥 ${floorPixels.toLocaleString("ko-KR")}개, 벽선 ${wallPixels.toLocaleString("ko-KR")}개를 인식했습니다.`
       );
       updateSafetyState();
+      invalidateRender();
     };
     img.onerror = () => {
+      if (loadVersion !== state.floorPlanVersion) return;
       state.imageFloorMask = null;
       state.imageWallMask = null;
       updateSceneStatus("바닥색 분석 실패", "평면도 이미지는 표시되지만 타일색 배치 제한은 적용되지 않았습니다.");
+      invalidateRender();
     };
-    img.src = imageDataUri;
+    if (loadedImage) img.onload();
+    else img.src = imageDataUri;
+  }
+
+  function createImageFloorRoom(group, sourceMask, sourceWidth, sourceHeight) {
+    if (!group || !group.parent || !state.floorBounds || countMaskPixels(sourceMask) === 0) return;
+
+    // 구형 이미지 평면도도 roomObjects를 만들어야 바닥재 적용 코드가
+    // 동일하게 동작한다. 원본(보통 수천 px) 크기의 CanvasTexture를 만들면
+    // 메모리가 급증하므로 편집용 마스크 해상도로 축소한다.
+    const width = Math.min(FLOOR_MASK_TARGET_WIDTH, sourceWidth);
+    const height = Math.max(96, Math.round(width * sourceHeight / Math.max(sourceWidth, 1)));
+    const mask = resizeBinaryMask(sourceMask, sourceWidth, sourceHeight, width, height);
+    const metrics = measureMask(mask, width, height);
+    if (metrics.count === 0) return;
+
+    clearRoomFloors();
+    const pending = state.pendingFloorApplication;
+    const roomData = {
+      width,
+      height,
+      bounds: state.floorBounds,
+      rooms: [{
+        id: "image_floor",
+        mask,
+        count: metrics.count,
+        bbox: metrics.bbox,
+        floorMaterial: pending ? pending.materialValue : state.activeFloorMaterial,
+        floorMaterialApplied: Boolean(pending),
+        wallMaterial: state.activeWallMaterial,
+      }],
+    };
+    const room = createRoomFloor(roomData.rooms[0], roomData);
+    // 원본 도면 이미지(y=0.001)보다 위, 벽/라벨 오버레이보다 아래에 둔다.
+    room.position.y = 0.006;
+    room.renderOrder = 1;
+    room.userData.renderedFloorY = 0.006;
+    group.add(room);
+    state.roomObjects = [room];
+    state.floorObjects = [room];
+    state.selectedRoomId = null;
+    state.pendingFloorApplication = null;
+    updateEstimate();
+  }
+
+  function resizeBinaryMask(source, sourceWidth, sourceHeight, targetWidth, targetHeight) {
+    if (sourceWidth === targetWidth && sourceHeight === targetHeight) return source.slice();
+    const resized = new Uint8Array(targetWidth * targetHeight);
+    for (let y = 0; y < targetHeight; y += 1) {
+      const sourceY = clamp(
+        Math.floor(((y + 0.5) / targetHeight) * sourceHeight),
+        0,
+        sourceHeight - 1
+      );
+      for (let x = 0; x < targetWidth; x += 1) {
+        const sourceX = clamp(
+          Math.floor(((x + 0.5) / targetWidth) * sourceWidth),
+          0,
+          sourceWidth - 1
+        );
+        resized[y * targetWidth + x] = source[sourceY * sourceWidth + sourceX] ? 1 : 0;
+      }
+    }
+    return resized;
   }
 
   function isBeigeTileColor(color) {
@@ -2231,16 +2324,44 @@
       console.warn("바닥재 이미지가 외부 URL이라 캔버스 텍스처 적용을 건너뜁니다:", material.imageUrl);
       return;
     }
-    const img = new Image();
-    img.onload = () => {
+    getCachedFloorImage(material.imageUrl).then((img) => {
       drawMaskedFloorCanvas(ctx, canvas, mask, material, img, roomData);
-      texture.needsUpdate = true;
-    };
-    img.onerror = () => {
+      markCanvasTexturesForUpdate(canvas);
+      // 렌더 루프는 변경이 있을 때만 화면을 다시 그린다. 이미지가 현재
+      // 프레임 이후에 도착하면 needsUpdate만으로는 새 텍스처가 보이지
+      // 않으므로 로드 완료 시점에도 렌더를 예약한다.
+      invalidateRender();
+    }).catch(() => {
       console.warn("바닥재 이미지를 불러오지 못했습니다:", material.imageUrl);
       texture.needsUpdate = true;
-    };
-    img.src = material.imageUrl;
+      invalidateRender();
+    });
+  }
+
+  function getCachedFloorImage(url) {
+    if (floorImageCache.has(url)) return floorImageCache.get(url);
+    const promise = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = url;
+    });
+    floorImageCache.set(url, promise);
+    // 일시적인 네트워크 오류가 영구 캐시되지 않게 다음 선택에서 재시도한다.
+    promise.catch(() => floorImageCache.delete(url));
+    return promise;
+  }
+
+  function markCanvasTexturesForUpdate(canvas) {
+    if (!state.scene) return;
+    state.scene.traverse((object) => {
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      materials.forEach((material) => {
+        if (material && material.map && material.map.image === canvas) {
+          material.map.needsUpdate = true;
+        }
+      });
+    });
   }
 
   function canUseImageInCanvas(url) {
@@ -2836,15 +2957,24 @@
   }
 
   async function loadFloorMaterials() {
+    const selectionVersionAtRequest = state.floorMaterialSelectionVersion;
     try {
       const items = await window.DuoApi.getJson("/api/floors");
-      state.floorMaterials = items.map(mapFloorMaterialItem).filter(Boolean);
+      const currentChoice = getActiveFloorMaterial();
+      state.floorMaterials = (Array.isArray(items) ? items : []).map(mapFloorMaterialItem).filter(Boolean);
       if (state.floorMaterials.length > 0 && !state.floorMaterials.some((item) => item.value === state.activeFloorMaterial)) {
-        state.activeFloorMaterial = state.floorMaterials[0].value;
+        if (state.floorMaterialSelectionVersion !== selectionVersionAtRequest && currentChoice) {
+          // API 응답 전에 사용자가 기본 바닥재를 눌렀다면 늦은 응답이 그
+          // 선택을 첫 DB 항목으로 되돌리지 않게 현재 선택을 유지한다.
+          state.floorMaterials.push(currentChoice);
+        } else {
+          state.activeFloorMaterial = state.floorMaterials[0].value;
+        }
       }
       renderFloorMaterials();
       renderCatalog();
       refreshRoomFloorMaterials(state.roomObjects);
+      refreshRenderedRoomFloors();
       updateEstimate();
     } catch (err) {
       console.warn("바닥재 데이터를 불러오지 못했습니다. 기본 패턴을 사용합니다.", err);
@@ -3019,8 +3149,8 @@
       button.querySelector(".material-swatch").style.background = material.swatch;
       button.addEventListener("click", () => {
         state.activeFloorMaterial = material.value;
-        applyFloorMaterial();
         renderFloorMaterials();
+        applyFloorMaterial(material.value);
       });
       el.appendChild(button);
     });
@@ -3177,23 +3307,38 @@
     ctx.globalAlpha = 1;
   }
 
-  async function applyFloorMaterial() {
-    const was3D = state.renderMode === "3d";
-    const targets = state.selectedRoomId
-      ? state.roomObjects.filter((room) => room.userData.id === state.selectedRoomId)
-      : state.roomObjects;
+  function applyFloorMaterial(materialValue) {
+    const value = materialValue || state.activeFloorMaterial;
+    state.floorMaterialSelectionVersion += 1;
+    let targetRoomId = state.selectedRoomId;
+    let targets = targetRoomId
+      ? state.roomObjects.filter((room) => room.userData.id === targetRoomId)
+      : state.roomObjects.slice();
+
+    // 방 재생성 직후 선택 ID가 바뀐 경우에는 아무것도 하지 않고 성공
+    // 메시지를 띄우지 말고, 안전하게 전체 방 적용으로 복구한다.
+    if (targetRoomId && targets.length === 0 && state.roomObjects.length > 0) {
+      targetRoomId = null;
+      state.selectedRoomId = null;
+      targets = state.roomObjects.slice();
+    }
+    if (targets.length === 0) {
+      state.pendingFloorApplication = { materialValue: value };
+      updateSceneStatus("바닥 준비 중", "평면도 바닥 분석이 끝나는 즉시 선택한 마감재를 적용합니다.");
+      return false;
+    }
+
+    state.pendingFloorApplication = null;
     targets.forEach((room) => {
-      room.userData.floorMaterial = state.activeFloorMaterial;
+      room.userData.floorMaterial = value;
       room.userData.floorMaterialApplied = true;
     });
     refreshRoomFloorMaterials(targets);
-    if (was3D) {
-      await refresh3DVisualization();
-    } else {
-      clearVisualization();
-    }
-    updateSceneStatus("바닥 마감재 적용", `${state.selectedRoomId ? "선택한 방을" : "전체 방을"} ${getActiveFloorMaterial().label} 마감으로 변경했습니다.`);
+    refreshRenderedRoomFloors();
+    const appliedMaterial = getFloorMaterialByValue(value);
+    updateSceneStatus("바닥 마감재 적용", `${targetRoomId ? "선택한 방을" : "전체 방을"} ${appliedMaterial.label} 마감으로 변경했습니다.`);
     updateEstimate();
+    return true;
   }
 
   function refreshRoomFloorMaterials(rooms) {
@@ -3213,6 +3358,9 @@
       }
       room.material = material;
     });
+    // 재질 교체는 OrbitControls의 change 이벤트를 발생시키지 않는다.
+    // 즉시 렌더를 예약해 첫 클릭부터 변경된 바닥이 표시되게 한다.
+    invalidateRender();
   }
 
   function createWallMaterial() {
@@ -5722,9 +5870,32 @@
       const clone = room.clone();
       clone.material = room.material.clone();
       if (room.material.map) clone.material.map = room.material.map.clone();
-      clone.position.y = -0.006;
+      clone.position.y = Number.isFinite(room.userData.renderedFloorY)
+        ? room.userData.renderedFloorY
+        : -0.006;
+      clone.userData = {
+        ...clone.userData,
+        type: "renderedRoomFloor",
+        sourceRoomId: room.userData.id,
+      };
       group.add(clone);
     });
+  }
+
+  function refreshRenderedRoomFloors() {
+    const group = state.visualizationGroup;
+    if (state.renderMode !== "3d" || !group || !group.parent) {
+      invalidateRender();
+      return;
+    }
+    group.children
+      .filter((child) => child.userData && child.userData.type === "renderedRoomFloor")
+      .forEach((floor) => {
+        group.remove(floor);
+        disposeObject3D(floor);
+      });
+    addRenderedRoomFloors(group);
+    invalidateRender();
   }
 
   function clearVisualization(options) {
